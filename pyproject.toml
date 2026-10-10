@@ -1,0 +1,24 @@
+[project]
+name = "simon"
+version = "0.1.0"
+description = "Simon — the Dreamhomesellers property concierge. A LangChain v1 agent that helps buyers search and filter listings, and helps sellers post them, on top of the shared property pool."
+readme = "README.md"
+authors = [
+    { name = "kelly26ici", email = "rexk638@gmail.com" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "asyncpg>=0.32.0",
+    "pydantic>=2.14.0",
+    "pydantic-settings>=2.15.0",
+]
+
+[dependency-groups]
+dev = []
+
+[project.scripts]
+simon = "simon.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.12.23,<0.13.0"]
+build-backend = "uv_build"

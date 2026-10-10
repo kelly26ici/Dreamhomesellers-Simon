@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.uv/
+
+# Databases / exports
+*.sqlite3
+*.db
+
+# Logs
+logs/
+*.log
+
+# Local planning + research vault — survives autocompacts, not git
+docs/
+
+
+# OS
+.DS_Store
+
+# uv lock is tracked; python version pin too
+!uv.lock
