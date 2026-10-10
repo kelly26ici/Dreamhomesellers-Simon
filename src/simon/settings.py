@@ -14,6 +14,8 @@ class PoolSettings(BaseSettings):
     postgres_dsn: SecretStr = SecretStr("")
     qdrant_url: str = ""
     qdrant_api_key: SecretStr = SecretStr("")
+    cloudflare_account_id: str = ""
+    cloudflare_api_token: SecretStr = SecretStr("")
 
 
 class ModelSettings(BaseSettings):
