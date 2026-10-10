@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import os
 
 from langchain.agents import create_agent
@@ -86,7 +87,10 @@ async def converse(agent, message: str, *, thread_id: str, on_token=None,
 
     Streams through astream_events version v3: the messages and tool_calls
     projections are drained concurrently so tokens and tool activity both
-    reach the callbacks as they happen.
+    reach the callbacks as they happen. on_token receives text deltas;
+    on_tool_call receives the call object (tool_name, input, output_deltas,
+    output, error) and may be sync or async — iterating output_deltas is the
+    callback's job, since only one consumer can drain them.
     """
     config = {"configurable": {"thread_id": thread_id}}
     stream = await agent.astream_events(
@@ -99,12 +103,16 @@ async def converse(agent, message: str, *, thread_id: str, on_token=None,
         async for message in stream.messages:
             async for token in message.text:
                 if on_token:
-                    on_token(token)
+                    result = on_token(token)
+                    if inspect.isawaitable(result):
+                        await result
 
     async def drain_tools():
         async for call in stream.tool_calls:
             if on_tool_call:
-                on_tool_call(call.tool_name, call.input)
+                result = on_tool_call(call)
+                if inspect.isawaitable(result):
+                    await result
 
     await asyncio.gather(drain_text(), drain_tools())
     final = await stream.output()

@@ -33,3 +33,6 @@ docs/
 
 # uv lock is tracked; python version pin too
 !uv.lock
+
+# Tool-generated, empty
+.claude-flow/

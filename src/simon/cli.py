@@ -26,7 +26,9 @@ def main():
                     message,
                     thread_id=thread_id,
                     on_token=lambda t: sys.stdout.write(t) or sys.stdout.flush(),
-                    on_tool_call=lambda n, a: print(f"\n[{n}]", file=sys.stderr),
+                    on_tool_call=lambda call: print(
+                        f"\n[{call.tool_name}]", file=sys.stderr
+                    ),
                 )
             )
         except Exception as exc:
