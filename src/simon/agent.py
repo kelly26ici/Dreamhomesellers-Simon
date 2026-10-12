@@ -31,6 +31,9 @@ def wire_tracing():
             mine.langsmith_api_key.get_secret_value()
         )
         os.environ.setdefault("LANGSMITH_PROJECT", mine.langsmith_project)
+        # No workspace id is set here on purpose: the lsv2_sk service key is
+        # workspace-scoped natively, and LANGSMITH_WORKSPACE_ID (when needed
+        # for an lsv2_pt personal token) is read straight from .env by the SDK.
     else:
         os.environ.pop("LANGSMITH_TRACING", None)
 
