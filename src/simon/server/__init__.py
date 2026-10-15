@@ -1,0 +1,1 @@
+"""Simon FastAPI server package."""
