@@ -2,6 +2,7 @@ import asyncio
 import inspect
 import logging
 import os
+import time
 
 import httpx
 
@@ -12,6 +13,13 @@ from simon.settings import get_model_settings, get_observability_settings
 from simon.tools import TOOLS
 
 LOGGER = logging.getLogger("simon.agent")
+
+# Providers that failed a probe or timed out a turn, with the time they may be
+# retried. Probing once at boot is not enough: a provider can pass a probe and
+# degrade minutes later (NVIDIA did exactly that), and a per-boot decision would
+# then hang every turn until the next restart.
+_provider_cooldown: dict[str, float] = {}
+COOLDOWN_SECONDS = 300.0
 
 
 SYSTEM_PROMPT = """I am Simon, the property concierge for Dreamhomesellers in Kenya.
@@ -145,13 +153,20 @@ def build_model():
     every turn. The resolved provider is reported by /api/health so which one is
     serving is visible rather than inferred.
     """
+    now = time.monotonic()
     for provider in PROVIDER_CHAIN:
+        if _provider_cooldown.get(provider, 0.0) > now:
+            continue
         model = _provider_model(provider)
         if model is None:
             continue
         if _probe(model):
             return model
-        LOGGER.warning("provider %s is not answering; trying the next one", provider)
+        _provider_cooldown[provider] = now + COOLDOWN_SECONDS
+        LOGGER.warning(
+            "provider %s is not answering; cooling it down for %.0fs and trying "
+            "the next one", provider, COOLDOWN_SECONDS,
+        )
     raise RuntimeError(
         f"No model key found for the configured chain "
         f"({' -> '.join(PROVIDER_CHAIN)}). I need one of: {configured}."
@@ -216,3 +231,37 @@ async def converse(agent, message: str, *, thread_id: str, on_token=None,
     final = await stream.output()
     answer = final["messages"][-1]
     return answer.text if hasattr(answer, "text") else str(answer.content)
+
+
+def active_provider_name() -> str | None:
+    """Which provider is currently serving, if one has been resolved.
+
+    The service needs this to attribute a failed turn to a provider. Derived
+    from the cooldown map rather than a stored "current" pointer, because
+    build_model() is called per request and the resolved provider can change
+    between requests when one is cooling down.
+    """
+    for provider in PROVIDER_CHAIN:
+        if provider not in _provider_cooldown:
+            try:
+                if _provider_model(provider) is not None:
+                    return provider
+            except Exception:  # noqa: BLE001
+                continue
+    return None
+
+
+def mark_provider_unavailable(provider: str) -> None:
+    """Cool a provider down after a turn it could not serve.
+
+    Called by the service boundary when a turn times out, so the next request
+    skips the provider that just failed instead of proving it again at the cost
+    of another full turn budget.
+    """
+    _provider_cooldown[provider] = time.monotonic() + COOLDOWN_SECONDS
+    LOGGER.warning("provider %s cooled down for %.0fs after a failed turn",
+                   provider, COOLDOWN_SECONDS)
+
+
+def reset_provider_cooldowns() -> None:
+    _provider_cooldown.clear()

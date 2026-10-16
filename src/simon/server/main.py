@@ -262,6 +262,20 @@ async def chat(req: ChatRequest) -> dict[str, Any]:
             timeout=45,
         )
     except asyncio.TimeoutError as exc:
+        # A turn that exhausts its budget is evidence about the PROVIDER, not
+        # about the question. Cool it down so the next request falls through to
+        # a live one instead of paying another 45s to learn the same thing.
+        # Health probes once per boot, so without this a provider that degrades
+        # mid-life pins the service until restart.
+        try:
+            from simon.agent import active_provider_name, mark_provider_unavailable
+
+            name = active_provider_name()
+            if name:
+                mark_provider_unavailable(name)
+        except Exception:  # noqa: BLE001 - never mask the 504 with a bookkeeping error
+            LOGGER.warning("could not cool down the provider after a timeout",
+                           exc_info=True)
         raise HTTPException(status_code=504, detail="Simon turn timed out") from exc
 
     return {
