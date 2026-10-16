@@ -6,7 +6,7 @@ from simon.agent import build_agent, converse
 
 
 def main():
-    agent = build_agent()
+    agent = asyncio.run(build_agent())
     thread_id = str(uuid.uuid4())
     print("Simon, Dreamhomesellers property concierge. Ask me anything.")
     while True:

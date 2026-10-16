@@ -10,30 +10,73 @@ Endpoints:
     GET  /api/health        liveness for the frontend status indicator
 
 SSE event contract (one JSON object per `data:` line):
-    {"type": "token", "data": "<text delta>"}
-    {"type": "done",  "data": {"answer": "<full>", "conversationId": "..."}}
-    {"type": "error", "data": "<message>"}
+    {"type": "token",   "data": "<text delta>"}
+    {"type": "done",    "data": {"answer": "<full>", "conversationId": "..."}}
+    {"type": "timeout", "data": "<message>"}   # turn exceeded the budget; retry
+    {"type": "error",   "data": "<message>"}   # turn failed
 
-Run:
-    uv run uvicorn simon.server.main:app --host 127.0.0.1 --port 8787
+Run (a container platform injects PORT and requires a non-loopback bind):
+    uv run uvicorn simon.server.main:app --host 0.0.0.0 --port ${PORT:-8787}
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import uuid
 from typing import Any, AsyncIterator, Literal
 
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from simon.agent import build_agent, converse
+from simon.agent import build_agent, build_model, converse
 from simon.tools import TOOLS
 
-app = FastAPI(title="Simon concierge service", version="0.1.0")
+async def _prune_loop():
+    """Periodically drop checkpoints past the retention window.
+
+    Checkpoints accumulate one row per super-step per conversation, so an
+    unpruned table grows without bound. Runs in the background; failures are
+    logged by the prune helper and never surface to a request.
+    """
+    from simon.checkpointer import prune_old_checkpoints
+
+    interval = 6 * 60 * 60
+    while True:
+        await asyncio.sleep(interval)
+        removed = await prune_old_checkpoints()
+        if removed and removed > 0:
+            LOGGER.info("pruned %d stale checkpoint groups", removed)
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    """Warm the checkpointer at boot rather than on the first request.
+
+    Warming at boot means /api/health can report memory truth on the very first
+    probe, and a bad POSTGRES_DSN is visible in the deploy log immediately
+    instead of after the first visitor message.
+    """
+    from simon.checkpointer import get_checkpointer
+
+    await get_checkpointer()
+    prune_task = asyncio.create_task(_prune_loop())
+    try:
+        yield
+    finally:
+        prune_task.cancel()
+        from simon.checkpointer import close_checkpointer
+
+        await close_checkpointer()
+
+
+LOGGER = logging.getLogger("simon.server")
+
+app = FastAPI(title="Simon concierge service", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -149,16 +192,59 @@ def context_digest(ctx: PageContext | None) -> str:
     return ("\n\n[Visitor context] " + " ".join(bits)) if bits else ""
 
 
-def make_agent():
-    """One agent per request: the InMemorySaver checkpointer (ADR-011 debt)
-    is not safe to share across concurrent conversations. Replace with the
-    persistent Postgres checkpointer before the native product launch."""
-    return build_agent()
+async def make_agent():
+    """One agent per request, but sharing the process-wide checkpointer.
+
+    The agent object itself is cheap to rebuild; the checkpointer is the
+    expensive, stateful part and must NOT be per-request — that is what made
+    ``thread_id`` decorative and multi-turn questions unanswerable.
+    ``simon.checkpointer`` owns the shared saver (AsyncPostgresSaver in
+    production, degrading to per-process memory with a logged reason when no
+    DSN is reachable).
+    """
+    from simon.checkpointer import get_checkpointer
+
+    return await build_agent(checkpointer=await get_checkpointer())
+
+
+async def _probe_model() -> str:
+    """Cheap readiness signal: can a model actually be constructed?
+
+    Constructing the chat model performs no API call, but it fails loudly when
+    no provider key is configured — which is precisely the state the old static
+    {"status":"ok"} hid. Returns the resolved provider name, or a reason string.
+    """
+    try:
+        model = build_model()
+    except Exception as exc:  # noqa: BLE001 - report, never 500 the health route
+        return f"unconfigured ({type(exc).__name__})"
+    for attr in ("model", "model_name"):
+        name = getattr(model, attr, None)
+        if isinstance(name, str) and name:
+            return name
+    return type(model).__name__
 
 
 @app.get("/api/health")
 async def health() -> dict[str, Any]:
-    return {"status": "ok", "service": "simon", "tools": len(TOOLS)}
+    """Readiness, not liveness.
+
+    Deliberately reports the things a misconfigured deploy used to hide: which
+    provider resolved, whether thread memory is persistent, and whether the
+    checkpointer fell back. No credential values, key presence only.
+    """
+    from simon.checkpointer import fallback_reason, is_persistent
+
+    provider = await _probe_model()
+    ready = provider and not provider.startswith("unconfigured")
+    return {
+        "status": "ok" if ready else "degraded",
+        "service": "simon",
+        "tools": len(TOOLS),
+        "provider": provider,
+        "memory": "postgres" if is_persistent() else "process",
+        "memory_detail": fallback_reason(),
+    }
 
 
 @app.post("/api/chat")
@@ -169,7 +255,7 @@ async def chat(req: ChatRequest) -> dict[str, Any]:
     conversation_id = req.conversation_id or str(uuid.uuid4())
     prompt = req.message + context_digest(req.page_context)
 
-    agent = make_agent()
+    agent = await make_agent()
     try:
         answer = await asyncio.wait_for(
             converse(agent, prompt, thread_id=conversation_id),
@@ -198,7 +284,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
     async def event_gen() -> AsyncIterator[str]:
         conversation_id = req.conversation_id or str(uuid.uuid4())
         prompt = req.message + context_digest(req.page_context)
-        agent = make_agent()
+        agent = await make_agent()
         parts: list[str] = []
         queue: asyncio.Queue[str] = asyncio.Queue(maxsize=1024)
         SENTINEL = "__SIMON_STREAM_DONE__"
@@ -216,10 +302,19 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                     ),
                     timeout=45,
                 )
+            except asyncio.TimeoutError:
+                # Distinguishable from a failed turn: the website treats a
+                # timeout as "the agent is thinking, retry" rather than
+                # "the agent is down", and silently reporting the generic
+                # error made a cold start look like an outage.
+                await queue.put(
+                    "data: "
+                    + json.dumps({"type": "timeout", "data": "Simon turn timed out"})
+                    + "\n\n"
+                )
             except Exception as exc:  # noqa: BLE001
                 await queue.put(
-                    "data: " + json.dumps({"type": "error", "data": str(exc)})
-                    + "\n\n"
+                    "data: " + json.dumps({"type": "error", "data": str(exc)}) + "\n\n"
                 )
             finally:
                 await queue.put(SENTINEL)

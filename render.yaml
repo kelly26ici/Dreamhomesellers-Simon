@@ -1,0 +1,70 @@
+# Simon — Render deploy manifest (ADR-008 FastAPI boundary, ADR-021 deployability)
+#
+# FACTS REQUIRED AT CREATION TIME:
+#   1. Callers/importers: NONE. This file is read by Render's platform at deploy
+#      time; no code imports it. Nothing in src/ references it.
+#   2. Public API affected: NONE. It declares a web service (name, runtime,
+#      region, build/start commands, health path) and env var NAMES.
+#   3. Data written: NONE. Every secret uses `sync: false`, so values come from
+#      the Render dashboard and are never stored in this file.
+#   4. Owner instruction verbatim: "reread all md files and everything in the
+#      docs folder, then use langchain skills, langchain mcp docs server,
+#      langchain mcp api reference, context7 and other tools to do what will be
+#      best, maybe a"
+#
+# WHY THIS FILE EXISTS: the Python package shipped no deploy manifest, which is
+# why the service has only ever run locally — there was nothing for a platform
+# to build from.
+#
+# PREREQUISITE: promoting fastapi/uvicorn out of the dev group into
+# [project.dependencies]. As transitive deps of the chainlit dev group,
+# `uv sync --frozen --no-dev` installed no ASGI server and the start command
+# failed at launch — the local path (`uv run`, which includes dev) masked a
+# production-only failure.
+#
+# Health check: GET /api/health reports READINESS, not liveness — the resolved
+# provider, whether thread memory is persistent, and the fallback reason when it
+# is not. A deploy with no model key or an unreachable Postgres DSN reports
+# status "degraded" instead of the old unconditional "ok".
+
+services:
+  - type: web
+    name: simon-api
+    runtime: python
+    plan: starter
+    region: frankfurt
+    # pyproject.toml pins ">=3.13,<3.14"; .python-version says 3.13.
+    pythonVersion: "3.13"
+    buildCommand: "uv sync --frozen --no-dev"
+    # 0.0.0.0, not 127.0.0.1: Render proxies from outside the container, so a
+    # loopback bind starts fine but is unreachable.
+    startCommand: "uv run uvicorn simon.server.main:app --host 0.0.0.0 --port $PORT"
+    healthCheckPath: /api/health
+    envVars:
+      # Required — the service cannot answer without a model provider.
+      - key: NVIDIA_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
+      # Buyer-safe semantic search + card hydration.
+      - key: QDRANT_URL
+        sync: false
+      - key: QDRANT_API_KEY
+        sync: false
+      # Embeddings for search_by_meaning.
+      - key: CLOUDFLARE_ACCOUNT_ID
+        sync: false
+      - key: CLOUDFLARE_API_TOKEN
+        sync: false
+      # Conversation memory (AsyncPostgresSaver). Without it the service runs,
+      # but /api/health reports memory:"process", thread_id becomes decorative
+      # again, and every turn starts cold.
+      - key: POSTGRES_DSN
+        sync: false
+      # Observability. Tracing is wired once per process from the lifespan.
+      - key: LANGSMITH_TRACING
+        value: "true"
+      - key: LANGSMITH_PROJECT
+        value: simon
