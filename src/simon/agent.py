@@ -1,12 +1,18 @@
 import asyncio
 import inspect
+import logging
 import os
+
+import httpx
 
 from langchain.agents import create_agent
 from langchain.chat_models import init_chat_model
 
 from simon.settings import get_model_settings, get_observability_settings
 from simon.tools import TOOLS
+
+LOGGER = logging.getLogger("simon.agent")
+
 
 SYSTEM_PROMPT = """I am Simon, the property concierge for Dreamhomesellers in Kenya.
 
@@ -52,6 +58,23 @@ def wire_tracing():
 # chain would otherwise fall back to a provider that cannot answer, silently.
 PROVIDER_CHAIN = ("nvidia", "poolside", "groq")
 
+# Per-call model timeout. LangChain takes this at CONSTRUCTION time, not per
+# invoke() call, so a slow provider has to be bounded where the model is built.
+# Kept under the service's 45s turn budget so a dead provider costs a fraction
+# of a turn instead of all of it.
+PROBE_TIMEOUT = 15.0
+
+
+def _http_client() -> httpx.Client:
+    """One bounded HTTP client shared by every provider.
+
+    ``request_timeout`` is inert on these integrations — LangChain transfers it
+    into model_kwargs and the provider SDK then applies its own 60s socket
+    default, which is why a dead NVIDIA endpoint burned 60s despite the setting.
+    An explicit httpx.Client is the knob that actually bounds the read.
+    """
+    return httpx.Client(timeout=httpx.Timeout(PROBE_TIMEOUT))
+
 
 def _provider_model(provider: str):
     """Build the chat model for one provider, or None when unconfigured."""
@@ -64,6 +87,7 @@ def _provider_model(provider: str):
                 model_provider="nvidia",
                 api_key=key,
                 temperature=0,
+                http_client=_http_client(),
             )
     elif provider == "poolside":
         key = mine.poolside_api_key.get_secret_value()
@@ -75,6 +99,7 @@ def _provider_model(provider: str):
                 api_key=key,
                 temperature=0,
                 use_responses_api=False,
+                http_client=_http_client(),
             )
     elif provider == "groq":
         key = mine.groq_api_key.get_secret_value()
@@ -83,22 +108,50 @@ def _provider_model(provider: str):
                 "groq:openai/gpt-oss-120b",
                 api_key=key,
                 temperature=0,
+                http_client=_http_client(),
             )
     return None
 
 
+def _probe(model, timeout: float = 12.0) -> bool:
+    """Is this model actually answering right now?
+
+    A key-presence chain is not enough: a provider can be configured and dead —
+    NVIDIA's endpoint began timing out at 60s while its key was present, so the
+    chain selected it and every turn hung until the service's own 45s budget
+    expired.
+
+    The timeout is deliberately tight (12s, not 60). A dead provider costs a
+    fraction of a turn instead of all of it, and the whole resolve stays well
+    inside the turn budget even when the first two providers are down. A ladder
+    of three 60s probes would defeat the point.
+
+    This runs per process, not per request: the service builds the agent once at
+    boot and the resolved model is a module-level fact, so a provider outage is
+    paid for on the next restart rather than on every visitor's message.
+    """
+    try:
+        model.invoke("reply with the single word: ok", timeout=timeout)
+        return True
+    except Exception:
+        return False
+
+
 def build_model():
-    """Resolve the primary configured provider, then its fallbacks in order.
+    """Resolve the first provider that is configured AND answering.
 
     Deliberately not key-presence order: a documented-dead key must not be able
-    to answer first, and the resolved provider is reported by /api/health so a
-    misconfiguration is visible rather than inferred.
+    to answer first, and a degraded-but-keyed provider must not be able to hang
+    every turn. The resolved provider is reported by /api/health so which one is
+    serving is visible rather than inferred.
     """
     for provider in PROVIDER_CHAIN:
         model = _provider_model(provider)
-        if model is not None:
+        if model is None:
+            continue
+        if _probe(model):
             return model
-    configured = ", ".join(p.upper() + "_API_KEY" for p in PROVIDER_CHAIN)
+        LOGGER.warning("provider %s is not answering; trying the next one", provider)
     raise RuntimeError(
         f"No model key found for the configured chain "
         f"({' -> '.join(PROVIDER_CHAIN)}). I need one of: {configured}."
