@@ -12,6 +12,16 @@ class PoolSettings(BaseSettings):
     supabase_url: str = ""
     supabase_key: SecretStr = SecretStr("")
     postgres_dsn: SecretStr = SecretStr("")
+    # Supabase pooler coordinates. These already exist in the deployed
+    # environment; they are read here only so the checkpointer can assemble a
+    # reachable DSN when the configured one points at the IPv6-only direct host.
+    supabase_pooler_host: str = ""
+    supabase_pooler_port: str = ""
+    supabase_pooler_user: str = ""
+    supabase_db_host: str = ""
+    supabase_db_password: SecretStr = SecretStr("")
+    supabase_db_name: str = ""
+    supabase_project_region: str = ""
     qdrant_url: str = ""
     qdrant_api_key: SecretStr = SecretStr("")
     cloudflare_account_id: str = ""
