@@ -64,7 +64,93 @@ def test_both_unset_resolves_to_empty_not_a_wrong_default(tmp_path):
     assert s.resolved_postgres_dsn == ""
 
 
+def test_pooler_candidates_carry_a_password_taken_from_the_pooler_dsn():
+    """SUPABASE_DB_PASSWORD is EMPTY in the deployed environment (checked via the
+    Render API). A pooler DSN built without a password is refused by Supabase at
+    authentication, so the fallback used to be "tried and failed" while never
+    holding valid credentials at all. The password is already inside
+    SUPABASE_POOLER_URL / DATABASE_URL, so it is taken from there."""
+    s = PoolSettings(
+        _env_file="",
+        database_url="postgresql://postgres.abc:secretpw@db.abc.supabase.co:5432/postgres",
+        supabase_pooler_url="postgresql://postgres.abc:secretpw@abc.pooler.supabase.com:6543/postgres",
+        supabase_db_password="",
+        supabase_pooler_host="abc.pooler.supabase.com",
+        supabase_pooler_user="postgres.abc",
+        supabase_project_region="eu-west-1",
+    )
+    out = candidate_dsns(
+        "postgresql://postgres.abc:secretpw@db.abc.supabase.co:5432/postgres", s
+    )
+    pooler = next(d for d in out if "abc.pooler.supabase.com" in d)
+    assert "secretpw" in pooler, "pooler candidate was built without the real password"
+
+
+def test_password_falls_back_to_the_configured_dsn_when_no_pooler_dsn():
+    s = PoolSettings(
+        _env_file="",
+        database_url="postgresql://postgres.abc:secretpw@db.abc.supabase.co:5432/postgres",
+        supabase_db_password="",
+        supabase_pooler_host="abc.pooler.supabase.com",
+        supabase_pooler_user="postgres.abc",
+    )
+    out = candidate_dsns(
+        "postgresql://postgres.abc:secretpw@db.abc.supabase.co:5432/postgres", s
+    )
+    assert any("secretpw" in d for d in out if "pooler" in d)
+
+
+def test_database_name_falls_back_to_the_one_in_the_dsn():
+    """SUPABASE_DB_NAME is unset in the deployed environment too; a pooler DSN
+    without a database name connects to nothing useful."""
+    s = PoolSettings(
+        _env_file="",
+        database_url="postgresql://postgres.abc:secretpw@db.abc.supabase.co:5432/analytics",
+        supabase_pooler_host="abc.pooler.supabase.com",
+        supabase_pooler_user="postgres.abc",
+    )
+    out = candidate_dsns(
+        "postgresql://postgres.abc:secretpw@db.abc.supabase.co:5432/analytics", s
+    )
+    assert any(d.endswith("/analytics") for d in out)
+
+
 def test_pooler_adds_session_mode_before_transaction_mode():
+    """AsyncPostgresSaver holds one connection and runs DDL: session (5432) is
+    the correct mode, so it must come first."""
+    s = PoolSettings(
+        _env_file="",
+        supabase_pooler_host="ref.aws-0-eu-west-1.pooler.supabase.com",
+        supabase_pooler_port="5432",
+        supabase_pooler_user="postgres.ref",
+        supabase_db_password="pw",
+        supabase_db_name="postgres",
+    )
+    out = candidate_dsns("postgresql://user:pass@db.ref.supabase.co:5432/postgres", s)
+    assert out[0] == "postgresql://user:pass@db.ref.supabase.co:5432/postgres"
+    assert "postgresql://postgres.ref:pw@ref.aws-0-eu-west-1.pooler.supabase.com:5432/postgres" in out
+    pooler = [u for u in out if "pooler.supabase.com" in u]
+    ports = [int(p.rsplit(":", 1)[1].split("/")[0]) for p in pooler]
+    assert 5432 in ports
+    assert 6543 in ports
+    assert ports.index(5432) < ports.index(6543)
+
+
+def test_pooler_credentials_are_url_escaped_when_password_has_specials():
+    """A literal '#', '@' or ':' in a password would silently truncate the DSN."""
+    s = PoolSettings(
+        _env_file="",
+        database_url="postgresql://postgres.abc:pw%23x@db.abc.supabase.co:5432/postgres",
+        supabase_pooler_host="abc.pooler.supabase.com",
+        supabase_pooler_user="postgres.abc",
+    )
+    out = candidate_dsns(
+        "postgresql://postgres.abc:pw%23x@db.abc.supabase.co:5432/postgres", s
+    )
+    pooler = next(d for d in out if "pooler" in d)
+    # the extracted secret is '#x', which must be re-encoded, not emitted raw
+    assert "pw%23x" in pooler
+    assert "pw#x" not in pooler
     """AsyncPostgresSaver holds one connection and runs DDL: session (5432) is
     the correct mode, so it must come first."""
     s = PoolSettings(
@@ -115,14 +201,18 @@ def test_no_duplicate_candidates():
 
 def test_pooler_without_password_still_offered():
     """Trust/peer/IAM clusters have no password. Requiring one silently removed
-    the fallback in the exact case it existed for."""
+    the fallback in the exact case it existed for. No env file is read here, and
+    the configured DSN is password-free too, so the candidate must be too."""
+    password_free = "postgresql://postgres@db.ref.supabase.co:5432/postgres"
     s = PoolSettings(
+        _env_file="",
+        database_url=password_free,
         supabase_pooler_host="127.0.0.1",
         supabase_pooler_port="55432",
         supabase_pooler_user="postgres",
         supabase_db_password="",
     )
-    out = candidate_dsns(_dsn("db.ref.supabase.co", 5432), s)
+    out = candidate_dsns(password_free, s)
     assert "postgresql://postgres@127.0.0.1:55432/postgres" in out
 
 

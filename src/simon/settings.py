@@ -26,6 +26,9 @@ class PoolSettings(BaseSettings):
     supabase_pooler_host: str = ""
     supabase_pooler_port: str = ""
     supabase_pooler_user: str = ""
+    # Supabase ships this DSN, and it is the only place the pooler-form username
+    # + password appear together — which is what a pooler connection must send.
+    supabase_pooler_url: SecretStr = SecretStr("")
     supabase_db_host: str = ""
     supabase_db_password: SecretStr = SecretStr("")
     supabase_db_name: str = ""

@@ -77,6 +77,8 @@ _fallback_reason: str | None = None
 # Set once every candidate has failed, so a service that already knows it is
 # degraded stops paying the connection cost on each request.
 _fallback_locked = False
+# Where the pooler password was read from, for the failure message.
+_last_password_source = "unknown"
 
 
 def is_persistent() -> bool:
@@ -101,6 +103,61 @@ def _host_port_of(dsn: str) -> str:
         return f"{u.hostname or '?'}{port}"
     except Exception:  # noqa: BLE001
         return "?"
+
+
+def _dsn_credentials(dsn: str) -> tuple[str, str, str]:
+    """(user, password, database) carried in a DSN, or ('', '', '')."""
+    try:
+        u = urlparse(dsn if "://" in dsn else "postgresql://" + dsn)
+    except Exception:  # noqa: BLE001 - a malformed DSN must not crash candidate building
+        return "", "", ""
+    from urllib.parse import unquote
+
+    return (
+        unquote(u.username or ""),
+        unquote(u.password or ""),
+        unquote((u.path or "").lstrip("/")),
+    )
+
+
+def _resolve_pool_password(configured: str, settings) -> tuple[str, str]:
+    """(password, where it came from) for the pooler candidates.
+
+    SUPABASE_DB_PASSWORD is EMPTY in the deployed environment — verified via the
+    Render API. A pooler DSN built without a password is refused by Supabase at
+    authentication, so the fallback would look "tried and failed" while never
+    having valid credentials at all. The same password is already embedded in
+    DATABASE_URL and in SUPABASE_POOLER_URL, so take it from there before giving
+    up; report the source so an operator can see which one was used.
+
+    Stored on the module so ``get_checkpointer()`` can name the credential source
+    in its failure message without re-reading the environment — a local variable
+    here would raise NameError on the no-password path and mask the real reason.
+    """
+    global _last_password_source
+    declared = getattr(settings, "supabase_db_password", None)
+    declared = declared.get_secret_value() if hasattr(declared, "get_secret_value") else str(declared or "")
+    if declared.strip():
+        _last_password_source = "SUPABASE_DB_PASSWORD"
+        return declared, _last_password_source
+
+    # Order matters: the pooler DSN is the authoritative one for pooler auth,
+    # because it carries the pooler-form username (postgres.<ref>) alongside the
+    # password — which is exactly what a pooler connection must send.
+    pooler_url_value = getattr(settings, "supabase_pooler_url", "") or ""
+    if hasattr(pooler_url_value, "get_secret_value"):
+        pooler_url_value = pooler_url_value.get_secret_value()
+    for name, value in (
+        ("SUPABASE_POOLER_URL", pooler_url_value),
+        ("DATABASE_URL/POSTGRES_DSN", configured),
+    ):
+        _, password, _ = _dsn_credentials(str(value or ""))
+        if password:
+            _last_password_source = name
+            return password, _last_password_source
+
+    _last_password_source = "none"
+    return "", _last_password_source
 
 
 def candidate_dsns(configured: str, settings) -> list[str]:
@@ -129,9 +186,13 @@ def candidate_dsns(configured: str, settings) -> list[str]:
     pooler_host = str(getattr(settings, "supabase_pooler_host", "") or "").strip()
     pooler_port = str(getattr(settings, "supabase_pooler_port", "") or "").strip()
     pooler_user = str(getattr(settings, "supabase_pooler_user", "") or "").strip()
-    password = getattr(settings, "supabase_db_password", None)
-    password = password.get_secret_value() if hasattr(password, "get_secret_value") else str(password or "")
-    database = str(getattr(settings, "supabase_db_name", "") or "").strip() or "postgres"
+    password, password_source = _resolve_pool_password(configured, settings)
+
+    # A pooler DSN without a database name still connects, but Supabase rejects
+    # a pooler user whose username is not in the pooler form, so prefer the
+    # database carried by the pooler DSN when the env names none.
+    _, _, dsn_database = _dsn_credentials(configured)
+    database = str(getattr(settings, "supabase_db_name", "") or "").strip() or dsn_database or "postgres"
 
     # Host + user are enough to form a candidate. A password is deliberately NOT
     # required: trust/peer/iam-authenticated clusters have none, and demanding
@@ -211,6 +272,10 @@ async def get_checkpointer():
         return _build_memory()
 
     candidates = candidate_dsns(configured, settings)
+    # candidate_dsns() records where it found the pooler password on the module
+    # (see _last_password_source); re-deriving it here would read the environment
+    # twice and could disagree with the candidates that were actually built.
+    password_source = _last_password_source
 
     from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
@@ -251,16 +316,17 @@ async def get_checkpointer():
                 _fallback_reason = None
                 if dsn != configured:
                     LOGGER.warning(
-                        "configured POSTGRES_DSN (%s) was unreachable; using the "
-                        "pooler DSN %s instead",
-                        _host_port_of(configured), _host_port_of(dsn),
+                        "configured DSN (%s) was unreachable; using the pooler DSN "
+                        "%s instead (pooler credentials taken from %s)",
+                        _host_port_of(configured), _host_port_of(dsn), password_source,
                     )
                 LOGGER.info("AsyncPostgresSaver ready (persistent thread memory)")
                 return saver
 
     _fallback_reason = (
-        f"postgres checkpointer unavailable after trying "
-        f"{len(candidates)} DSN(s): " + "; ".join(failures[:6])
+        "postgres checkpointer unavailable after trying "
+        f"{len(candidates)} DSN(s) (pooler credentials from {password_source}): "
+        + "; ".join(failures[:6])
     )
     _fallback_locked = True
     LOGGER.warning(
