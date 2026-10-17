@@ -33,6 +33,37 @@ def test_configured_dsn_alone_yields_one_candidate():
     assert out == [_dsn("db.example.test", 5432)]
 
 
+def test_database_url_is_accepted_when_postgres_dsn_is_unset():
+    """Render's dashboard names this var DATABASE_URL. The deployed Simon service
+    defines DATABASE_URL and NOT POSTGRES_DSN, so reading only POSTGRES_DSN
+    silently produced an empty string and the checkpointer burned its whole
+    chain on a variable that did not exist."""
+    s = PoolSettings(_env_file="", database_url="postgresql://u:p@db.ref.supabase.co:5432/postgres")
+    assert s.resolved_postgres_dsn == "postgresql://u:p@db.ref.supabase.co:5432/postgres"
+    assert list(candidate_dsns(s.resolved_postgres_dsn, s)) == [
+        "postgresql://u:p@db.ref.supabase.co:5432/postgres"
+    ]
+
+
+def test_postgres_dsn_wins_over_database_url():
+    """The explicit name is the deliberate override, not the loser."""
+    s = PoolSettings(
+        postgres_dsn="postgresql://u:p@explicit.example.test:5432/postgres",
+        database_url="postgresql://u:p@legacy.example.test:5432/postgres",
+    )
+    assert "explicit.example.test" in s.resolved_postgres_dsn
+    assert "legacy.example.test" not in s.resolved_postgres_dsn
+
+
+def test_both_unset_resolves_to_empty_not_a_wrong_default(tmp_path):
+    """Must be empty, not a fallback to whatever the developer's .env happens to
+    hold. ``PoolSettings`` reads simon/.env by default, so the env file is
+    pointed at a scratch path — a test that silently picks up a real DSN both
+    proves nothing and can leak one into assertion output."""
+    s = PoolSettings(_env_file=str(tmp_path / "absent.env"))
+    assert s.resolved_postgres_dsn == ""
+
+
 def test_pooler_adds_session_mode_before_transaction_mode():
     """AsyncPostgresSaver holds one connection and runs DDL: session (5432) is
     the correct mode, so it must come first."""

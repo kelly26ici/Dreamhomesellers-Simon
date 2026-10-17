@@ -11,10 +11,18 @@ class PoolSettings(BaseSettings):
 
     supabase_url: str = ""
     supabase_key: SecretStr = SecretStr("")
+    # The checkpointer's Postgres DSN. Render's dashboard historically names
+    # this variable DATABASE_URL, and the deployed Simon service DOES define
+    # DATABASE_URL and DOES NOT define POSTGRES_DSN — so reading only
+    # POSTGRES_DSN silently yields an empty string and the checkpointer
+    # "degrades" for a reason that never appears in the code. Both names are
+    # accepted here, POSTGRES_DSN winning on purpose (it is the explicit one).
     postgres_dsn: SecretStr = SecretStr("")
-    # Supabase pooler coordinates. These already exist in the deployed
-    # environment; they are read here only so the checkpointer can assemble a
-    # reachable DSN when the configured one points at the IPv6-only direct host.
+    database_url: SecretStr = SecretStr("")
+    # Supabase pooler coordinates. Read so the checkpointer can assemble a
+    # reachable DSN when the configured one points at the IPv6-only direct host
+    # (db.<ref>.supabase.co has no A record on any Supabase plan; an IPv4
+    # address for it is a Pro-plan add-on).
     supabase_pooler_host: str = ""
     supabase_pooler_port: str = ""
     supabase_pooler_user: str = ""
@@ -26,6 +34,21 @@ class PoolSettings(BaseSettings):
     qdrant_api_key: SecretStr = SecretStr("")
     cloudflare_account_id: str = ""
     cloudflare_api_token: SecretStr = SecretStr("")
+
+    @property
+    def resolved_postgres_dsn(self) -> str:
+        """POSTGRES_DSN if set, else DATABASE_URL, else empty.
+
+        Resolved explicitly rather than with a pydantic ``validation_alias``:
+        the two names mean the same thing here, but which one the platform
+        injects is an accident of deploy history — and a silent empty default is
+        the least debuggable of the possibilities.
+        """
+        for name in ("postgres_dsn", "database_url"):
+            value = getattr(self, name)
+            if value is not None and value.get_secret_value():
+                return value.get_secret_value()
+        return ""
 
 
 class ModelSettings(BaseSettings):

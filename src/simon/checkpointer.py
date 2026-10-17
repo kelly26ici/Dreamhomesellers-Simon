@@ -16,25 +16,32 @@ Lifecycle: ``setup()`` creates the checkpoint tables and is safe to call on
 every boot (idempotent). It is invoked from the FastAPI lifespan in
 ``server/main.py``; this module holds the singleton and the prune helper.
 
-Connectivity note — the real production failure, measured 2026-10-17. The
-``POSTGRES_DSN`` shipped on Render points at Supabase's direct host
-(``db.<ref>.supabase.co``), which has NO A record: it resolves to IPv6 only
-(``2a05:d018:…``). On an IPv4-only network the socket fails before authentication,
-so the service degraded to per-process memory and ``/api/health`` reported
-``postgres checkpointer unavailable: OperationalError`` for days.
+Connectivity note — how this actually failed in production, measured 2026-10-17,
+and how it was diagnosed. Three separate faults were stacked, and each one hides
+the next:
 
-Supabase's pooler is the IPv4-reachable path, and the variables that describe it
-were ALREADY present in the service's environment (``SUPABASE_POOLER_HOST`` /
-``_PORT`` / ``_USER`` and ``SUPABASE_DB_PASSWORD``) — just never assembled into
-a DSN. ``candidate_dsns()`` builds that DSN and tries it whenever the configured
-one is unreachable, which is what restores persistent memory on Render without a
-hand-edit of the environment.
+1. The deployed service defines ``DATABASE_URL`` and does NOT define
+   ``POSTGRES_DSN``. Reading one hardcoded name therefore returned an empty
+   string, and the "DSN is not set" branch burned the whole chain — the real
+   Postgres coordinates were present in the environment the entire time.
+   Fixed in ``PoolSettings.resolved_postgres_dsn``.
 
-Pooler port semantics matter: Supabase transaction mode is 6543 and session mode
-is 5432. ``AsyncPostgresSaver`` keeps one connection open for the process
-lifetime and runs DDL through it, so it wants SESSION mode; 6543 is still tried
-as a second candidate because a pooler that only exposes transaction mode is
-better than no checkpointer at all.
+2. Supabase's DIRECT host (``db.<ref>.supabase.co``) has no A record on ANY plan:
+   it resolves to IPv6 only (``2a05:d018:…``). An IPv4 address for it is a paid
+   Pro-plan add-on. On an IPv4 network the socket fails before authentication,
+   which surfaces as ``OperationalError: Network is unreachable`` and looks like
+   a bad password rather than an address family.
+
+3. The pooler (``<ref>.pooler.supabase.com`` / ``aws-0-<region>.pooler.supabase.com``)
+   IS IPv4-reachable and is free on every plan, but its plain egress to a
+   third-party host on 5432/6543 depends on the platform's outbound rules; a
+   service whose HTTP egress works can still have its Postgres egress blocked.
+   ``candidate_dsns()`` tries every reachable-looking option so the actual
+   blocker is named in ``fallback_reason()`` instead of guessed at.
+
+Order matters when reading a failure: check which variable is actually set,
+then the address family, then the port's outbound reachability. Diagnosing from
+the bottom up produces confident wrong answers — as it did here twice.
 """
 
 from __future__ import annotations
@@ -189,8 +196,10 @@ async def get_checkpointer():
         return _build_memory()
 
     settings = get_pool_settings()
-    raw = settings.postgres_dsn
-    configured = raw.get_secret_value() if hasattr(raw, "get_secret_value") else str(raw or "")
+    # POSTGRES_DSN or DATABASE_URL — see PoolSettings.resolved_postgres_dsn. The
+    # deployed service defines only DATABASE_URL, so reading one hardcoded name
+    # is what made this look like an environment problem.
+    configured = settings.resolved_postgres_dsn
 
     if not configured:
         _fallback_reason = "POSTGRES_DSN is not set and no pooler DSN could be derived"
