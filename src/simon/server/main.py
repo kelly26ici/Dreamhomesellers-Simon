@@ -74,9 +74,17 @@ async def lifespan(_: FastAPI):
         await close_checkpointer()
 
 
+# Agent Streaming Protocol (/threads/{id}/commands + /stream): without it
+# no standard chat UI — Agent Chat UI, useStream, the LangGraph SDK — can
+# talk to Simon at all. Mounted here so it shares the app's CORS and
+# lifespan (the checkpointer it reads runs state.get against the same
+# singleton /api/chat writes).
+from simon.server import protocol
+
 LOGGER = logging.getLogger("simon.server")
 
 app = FastAPI(title="Simon concierge service", version="0.1.0", lifespan=lifespan)
+app.include_router(protocol.router)
 
 app.add_middleware(
     CORSMiddleware,
