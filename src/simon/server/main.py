@@ -7,6 +7,8 @@ streaming boundary. Mirrors the frontend contract `src/lib/simon/types.ts`.
 Endpoints:
     POST /api/chat          one concierge turn; non-streaming JSON envelope
     POST /api/chat/stream   same turn as an SSE token stream
+    POST /api/aux           one bounded, tool-less model call (thread titles,
+                            summaries); never touches the agent or checkpoints
     GET  /api/health        liveness for the frontend status indicator
 
 SSE event contract (one JSON object per `data:` line):
@@ -151,6 +153,21 @@ class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
     conversation_id: str | None = None
     page_context: PageContext | None = None
+
+
+class AuxRequest(BaseModel):
+    """A single, tool-less model call for host-side metadata.
+
+    Thread titles and rolling summaries are metadata, not conversation: they
+    must not create checkpoints, appear in history, or share the agent's
+    system prompt. Keeping them here also means a dead title model can never
+    take down `/api/chat`.
+    """
+
+    model_config = {"extra": "ignore"}
+
+    prompt: str = Field(min_length=1, max_length=8000)
+    timeout_seconds: float = Field(default=8.0, ge=1.0, le=15.0)
 
 
 def context_digest(ctx: PageContext | None) -> str:
@@ -364,3 +381,45 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@app.post("/api/aux")
+async def aux(req: AuxRequest) -> dict[str, Any]:
+    """One bounded model call for host-side metadata.
+
+    The caller (the LUXONN Next app) owns the prompt and parses strict JSON
+    out of the answer; Simon owns provider selection. No tools are bound and
+    no checkpoint is read or written, so this cannot mutate a conversation.
+
+    `build_model()` probes providers synchronously (up to 12s each), so it is
+    moved off the event loop. The invoke itself is capped by the caller's
+    timeout so a dead provider fails the metadata call instead of the page.
+    """
+    try:
+        model = await asyncio.to_thread(build_model)
+    except Exception as exc:  # noqa: BLE001 - report as unavailable
+        LOGGER.warning("aux: no model available: %s", exc)
+        raise HTTPException(status_code=503, detail="model unavailable") from exc
+
+    try:
+        result = await asyncio.wait_for(
+            model.ainvoke(req.prompt), timeout=req.timeout_seconds
+        )
+    except asyncio.TimeoutError as exc:
+        raise HTTPException(status_code=504, detail="aux timed out") from exc
+    except Exception as exc:  # noqa: BLE001 - one retry belongs to the caller
+        LOGGER.warning("aux: model call failed: %s", exc)
+        raise HTTPException(status_code=502, detail="aux failed") from exc
+
+    content = getattr(result, "content", result)
+    if isinstance(content, list):
+        # Some providers return content blocks instead of a string.
+        content = "".join(
+            block.get("text", "")
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        )
+    if not isinstance(content, str):
+        content = str(content)
+
+    return {"text": content}
