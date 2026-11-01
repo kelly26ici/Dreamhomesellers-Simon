@@ -35,10 +35,18 @@ Why it is built this way:
   one checkpointer, so two concurrent turns would interleave tool calls through
   the same history.
 
-- tool-call events are the point of the adapter. `converse()` already emits them
-  via on_tool_call; the protocol's `tools` channel turns a 15s silent pause into
-  a visible "searched 30 published listings" card, which is what makes the wait
-  feel like work instead of a hang.
+- tool-call events are the point of the adapter. `converse()` emits a start
+  event and a terminal event per tool; the protocol's `tools` channel turns a
+  15s silent pause into a visible "searched 30 published listings" card, and
+  `tool-finished` only lands when the result actually exists.
+
+- listing cards travel on the protocol's `custom` channel as
+  ``{"name": "listingCards", "cards": [...]}``. They are derived from the
+  terminal tool output by ``simon.server.cards`` so the browser never has to
+  parse a model-facing payload, and each card is published once per turn.
+  Field names on the `tools` channel follow ``langgraph_sdk`` exactly
+  (``tool_call_id`` / ``tool_name`` / ``input`` / ``output`` / ``message``);
+  the UI parses the protocol, not Simon's private spelling.
 """
 
 from __future__ import annotations
@@ -51,6 +59,8 @@ import uuid
 from typing import Any, AsyncIterator
 
 from simon.agent import build_agent, converse
+from simon.server.cards import cards_from_tool_result, merge_cards
+from simon.server.page_context import context_digest, page_context_from_metadata
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -171,6 +181,25 @@ def _message_text(params: RunStartParams) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _tool_call_id(call: Any) -> str:
+    """The id the protocol's `tools` channel is keyed by.
+
+    ``ToolCallStream`` names it ``tool_call_id``. The ``id`` fallback keeps a
+    hand-built call object (tests, older integrations) addressable instead of
+    minting a random id that no client can correlate.
+    """
+    value = getattr(call, "tool_call_id", None) or getattr(call, "id", None)
+    return str(value) if value else uuid.uuid4().hex
+
+
+def _tool_name(call: Any) -> str:
+    return (
+        getattr(call, "tool_name", None)
+        or getattr(call, "name", None)
+        or "tool"
+    )
+
+
 async def _execute_run(run: _Run, params: RunStartParams) -> None:
     """Run one agent turn, publishing lifecycle / message / tool events."""
     from simon.checkpointer import get_checkpointer
@@ -183,7 +212,18 @@ async def _execute_run(run: _Run, params: RunStartParams) -> None:
         if not text:
             raise ValueError("run.start carried no user message")
 
+        # The Next relay puts the typed page context in run.start metadata.
+        # Without this digest the streaming path could not answer "what about
+        # this one?" on a listing page, even though /api/chat could. Context is
+        # untrusted: a malformed payload degrades to no context.
+        prompt = text + context_digest(
+            page_context_from_metadata(params.metadata)
+        )
+
         agent = await build_agent(checkpointer=await get_checkpointer())
+
+        cards: list[dict] = []
+        seen_listing_ids: set[str] = set()
 
         def on_token(token: str) -> None:
             _publish(
@@ -198,20 +238,54 @@ async def _execute_run(run: _Run, params: RunStartParams) -> None:
             )
 
         def on_tool_call(call: Any) -> None:
-            name = getattr(call, "tool_name", None) or getattr(call, "name", "") or "tool"
-            call_id = str(getattr(call, "id", "") or uuid.uuid4().hex)
+            # START only: `call.output` is still None here. Publishing a
+            # finished event from this callback is what made the UI mark a
+            # search complete the instant it began.
             _publish(
                 run,
                 "tools",
-                {"event": "tool-started", "toolCallId": call_id, "name": name, "args": getattr(call, "input", None) or {}},
-            )
-            _publish(
-                run,
-                "tools",
-                {"event": "tool-finished", "toolCallId": call_id, "name": name, "result": getattr(call, "output", None)},
+                {
+                    "event": "tool-started",
+                    "tool_call_id": _tool_call_id(call),
+                    "tool_name": _tool_name(call),
+                    "input": getattr(call, "input", None) or {},
+                },
             )
 
-        answer = await converse(agent, text, thread_id=run.thread_id, on_token=on_token, on_tool_call=on_tool_call)
+        def on_tool_result(call: Any) -> None:
+            call_id = _tool_call_id(call)
+            error = getattr(call, "error", None)
+            if error:
+                _publish(
+                    run,
+                    "tools",
+                    {"event": "tool-error", "tool_call_id": call_id, "message": str(error)},
+                )
+                return
+
+            output = getattr(call, "output", None)
+            _publish(
+                run,
+                "tools",
+                {"event": "tool-finished", "tool_call_id": call_id, "output": output},
+            )
+
+            fresh = merge_cards(
+                cards, cards_from_tool_result(output), seen=seen_listing_ids
+            )
+            if fresh:
+                # Only the newly discovered cards: the client merges frames,
+                # and a replay must reproduce the same sequence it saw live.
+                _publish(run, "custom", {"name": "listingCards", "cards": fresh})
+
+        answer = await converse(
+            agent,
+            prompt,
+            thread_id=run.thread_id,
+            on_token=on_token,
+            on_tool_call=on_tool_call,
+            on_tool_result=on_tool_result,
+        )
 
         _publish(run, "messages", {"event": "message-finish", "id": f"msg_{run.run_id}", "role": "ai"})
         _publish(run, "lifecycle", {"event": "completed", "namespace": []})

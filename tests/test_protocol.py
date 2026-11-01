@@ -39,16 +39,34 @@ def client(monkeypatch):
 
     monkeypatch.setattr(proto, "build_agent", fake_build_agent)
 
-    async def fake_converse(agent, message, *, thread_id, on_token=None, on_tool_call=None, **_):
-        if on_tool_call:
-
+    async def fake_converse(agent, message, *, thread_id, on_token=None, on_tool_call=None, on_tool_result=None, **_):
+        if on_tool_call or on_tool_result:
             class _Call:
+                tool_call_id = "tc_1"
                 tool_name = "search_properties"
-                id = "tc_1"
-                input = {"location": "Karen"}
-                output = {"count": 2}
+                input = {"area": "Karen"}
+                output = {
+                    "count": 1,
+                    "properties": [
+                        {
+                            "listing_id": "11111111-1111-4111-8111-111111111111",
+                            "title": "Karen Ridge Villa",
+                            "property_type": "house",
+                            "location": "Karen, Nairobi",
+                            "price": "11500000.00",
+                            "currency": "KES",
+                            "price_period": "total",
+                            "bedrooms": 4,
+                            "bathrooms": 3,
+                        }
+                    ],
+                }
+                error = None
 
-            on_tool_call(_Call())
+            if on_tool_call:
+                on_tool_call(_Call())
+            if on_tool_result:
+                on_tool_result(_Call())
         if on_token:
             on_token("hello ")
             on_token("there")
@@ -169,11 +187,79 @@ def test_stream_replays_and_streams_protocol_events(client):
     assert delta["delta"]["type"] == "text-delta"
     assert "hello" in delta["delta"]["text"]
 
-    tool = next(e["params"]["data"] for e in events if e["method"] == "tools")
-    assert tool["event"] == "tool-started"
-    assert tool["name"] == "search_properties"
-    assert tool["args"] == {"location": "Karen"}
+    tool_events = [e["params"]["data"] for e in events if e["method"] == "tools"]
+    started = next(e for e in tool_events if e["event"] == "tool-started")
+    assert started["tool_name"] == "search_properties"
+    assert started["input"] == {"area": "Karen"}
+    assert started["tool_call_id"] == "tc_1"
+
+    finished = next(e for e in tool_events if e["event"] == "tool-finished")
+    assert finished["tool_call_id"] == started["tool_call_id"], (
+        "started and finished must correlate by the protocol's tool_call_id"
+    )
+    assert finished["output"]["count"] == 1, (
+        "tool-finished carries the RESULT; publishing it at tool-start is the bug"
+    )
+
+    cards = next(
+        e["params"]["data"]
+        for e in events
+        if e["method"] == "custom"
+        and e["params"]["data"].get("name") == "listingCards"
+    )
+    assert cards["cards"][0]["listingId"] == "11111111-1111-4111-8111-111111111111"
+    assert cards["cards"][0]["price"] == "11500000.00", "money stays a decimal string"
+
     assert run_id.startswith("run_")
+
+
+def test_run_start_carries_page_context_into_the_prompt(client, monkeypatch):
+    """The streamed path must resolve "this" exactly like /api/chat does.
+
+    The Next relay sends page context in run.start metadata. Ignoring it made
+    the primary transport unable to answer "what about this one?" on a listing
+    page while the fallback route could.
+    """
+    seen = {}
+
+    async def capture(
+        agent,
+        message,
+        *,
+        thread_id,
+        on_token=None,
+        on_tool_call=None,
+        on_tool_result=None,
+        **_,
+    ):
+        seen["message"] = message
+        return "ok"
+
+    monkeypatch.setattr(proto, "converse", capture)
+    client.post(
+        "/threads/t8/commands",
+        json={
+            "id": 10,
+            "method": "run.start",
+            "params": {
+                "input": {
+                    "messages": [{"role": "user", "content": "what about this one?"}]
+                },
+                "metadata": {
+                    "pageContext": {
+                        "view_mode": "property_detail",
+                        "active_listing_id": "listing-1",
+                    }
+                },
+            },
+        },
+    )
+
+    with client.stream("POST", "/threads/t8/stream") as resp:
+        _read_sse(resp)
+
+    assert "what about this one?" in seen["message"]
+    assert "listing-1" in seen["message"]
 
 
 def test_replay_after_last_event_id_does_not_rerun_the_turn(client, monkeypatch):
