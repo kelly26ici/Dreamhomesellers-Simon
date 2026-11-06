@@ -35,6 +35,11 @@ class PoolSettings(BaseSettings):
     supabase_project_region: str = ""
     qdrant_url: str = ""
     qdrant_api_key: SecretStr = SecretStr("")
+    # The companion website's Render base URL. Read by src/simon/keepalive.py to
+    # give that service inbound traffic, which is the only thing that keeps a
+    # free Render web service from spinning down. Empty = keep-alive disabled,
+    # which is the right default for a local run.
+    luxonn_site_url: str = ""
     cloudflare_account_id: str = ""
     cloudflare_api_token: SecretStr = SecretStr("")
 

@@ -35,6 +35,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from simon import keepalive
 from simon.agent import build_agent, build_model, converse
 from simon.server.cards import cards_from_tool_result, merge_cards
 from simon.server.page_context import PageContext, context_digest
@@ -69,9 +70,12 @@ async def lifespan(_: FastAPI):
 
     await get_checkpointer()
     prune_task = asyncio.create_task(_prune_loop())
+    keepalive_task = keepalive.start()
     try:
         yield
     finally:
+        if keepalive_task is not None:
+            keepalive_task.cancel()
         prune_task.cancel()
         from simon.checkpointer import close_checkpointer
 
