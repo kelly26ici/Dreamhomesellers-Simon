@@ -32,7 +32,7 @@ HEADER_NAME = "x-simon-secret"
 
 
 def _expected() -> str:
-    return get_settings().shared_secret.get_secret_value()
+    return get_settings().shared_secret_value
 
 
 def is_authenticated(request: Request) -> bool:

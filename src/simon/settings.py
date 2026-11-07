@@ -91,7 +91,16 @@ class Settings(BaseSettings):
     # endpoint -- including the bounded /api/aux model call -- is an open LLM
     # proxy on a public host. Empty = authentication disabled, which is only
     # acceptable for a local run.
+    #
+    # Both names are accepted on purpose. The field is `shared_secret`, so
+    # pydantic reads `SHARED_SECRET` by default; the website namespaces the same
+    # credential as `SIMON_SHARED_SECRET`, and Render carries that name on BOTH
+    # services so the two sides agree by construction. Before this alias existed
+    # the names could drift, and because the model uses extra="ignore" the
+    # mismatch was silent: Simon read an empty string, logged "auth disabled",
+    # and enforced nothing while appearing configured.
     shared_secret: SecretStr = SecretStr("")
+    simon_shared_secret: SecretStr = SecretStr("")
     port: int = 8787
 
     # ---- Observability ---------------------------------------------------
@@ -128,6 +137,22 @@ class Settings(BaseSettings):
         """The configured API key for a provider, or empty when unconfigured."""
         key = getattr(self, f"{provider}_api_key", None)
         return key.get_secret_value() if key else ""
+
+    @property
+    def shared_secret_value(self) -> str:
+        """The shared secret, from either accepted name; empty when unset.
+
+        Both names are read because Render carries `SIMON_SHARED_SECRET` on both
+        services while pydantic's default for this field is `SHARED_SECRET`.
+        Resolving here, rather than through a `validation_alias`, keeps the
+        precedence visible in code instead of implicit in the settings model.
+        """
+        for name in ("shared_secret", "simon_shared_secret"):
+            value = getattr(self, name)
+            secret = value.get_secret_value() if value else ""
+            if secret:
+                return secret
+        return ""
 
     def model_override_for(self, provider: str) -> str:
         """A per-provider model override, e.g. SIMON_GROQ_MODEL, or empty.
