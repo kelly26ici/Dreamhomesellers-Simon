@@ -34,9 +34,26 @@ def reset_serving_model() -> None:
 
 @wrap_model_call
 def serving_model_middleware(request, handler):
-    """Record the model id that produced this response."""
-    response = handler(request)
-    model = getattr(response, "model", None)
-    if model is not None:
-        record_serving_model(str(model))
-    return response
+    """Record the model id that is about to serve this call.
+
+    Reads the id off ModelRequest.model, NOT off the response. ModelResponse
+    has exactly two fields -- `result` and `structured_response` -- so there is
+    no `.model` to read, and a version that looks for one records nothing
+    while appearing to work. Verified by introspection, not assumption: the
+    first implementation did exactly that and shipped empty in production.
+
+    Recording the request also means the id is the model that actually SERVED,
+    including when fallback substituted a different one -- the framework
+    rebuilds the request with the fallback model before this hook sees it.
+    """
+    record_serving_model(model_id(request.model))
+    return handler(request)
+
+
+def model_id(model) -> str:
+    """Best available identifier for a chat model, across provider types."""
+    for attr in ("model", "model_name", "id"):
+        value = getattr(model, attr, None)
+        if isinstance(value, str) and value:
+            return value
+    return type(model).__name__
