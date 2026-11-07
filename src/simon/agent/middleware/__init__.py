@@ -7,22 +7,22 @@ build_agent is one nobody can test.
 ORDER, outermost first, and why that order:
 
   1-2  ModelCallLimit, ToolCallLimit. Cheapest guards run first, so a runaway
-       turn is stopped before anything expensive happens. This pair is the
-       direct fix for the per-request cost bug.
+        turn is stopped before anything expensive happens. This pair is the
+        direct fix for the per-request cost bug.
   3-4  ModelRetry, ToolRetry. Transient failures are retried IN PLACE, with
-       backoff and jitter, before anything more drastic happens.
+        backoff and jitter, before anything more drastic happens.
   5    ModelFallback. Only after retry has failed, fall through the chain.
-       Ordering 4-before-5 is the point: a 429 should not cost a provider
-       switch.
+        Ordering 4-before-5 is the point: a 429 should not cost a provider
+        switch.
   6    ToolError. What the model is TOLD when a tool really fails -- redacted,
-       so a Postgres error string never reaches a buyer.
+        so a Postgres error string never reaches a buyer.
   7-9  PII. Outbound only. On the way out so the concierge can still accept a
-       buyer's phone number to schedule a viewing.
+        buyer's phone number to schedule a viewing.
   10-11 ContextEditing, Summarization. Context hygiene, oldest-first: drop
-       stale tool outputs, then compress the whole history if it is long.
-  12   To-do list. Available, dormant unless the model needs it.
-  13   ServingModel, Refusal. Observability. These must wrap the model call to
-       see what actually served, so they sit innermost.
+        stale tool outputs, then compress the whole history if it is long.
+  12   TodoList. Available, dormant unless the model needs it.
+  13   ServingModel. Observability. It wraps the model call to see what
+        actually served, so it sits innermost.
 
 WHAT IS DELIBERATELY ABSENT:
 
@@ -36,6 +36,12 @@ WHAT IS DELIBERATELY ABSENT:
 
   LLMToolSelectorMiddleware. It spends a model call to pick tools, which costs
   more than it saves with a six-tool registry the model already knows.
+
+  A refusal signal. An earlier revision added an after_model hook that set a
+  boolean from a substring match on the answer. It was dropped: it needed a
+  dedicated entry-point investigation to test, and "the model may have
+  refused" is not something an operator can act on. Observability that answers
+  a real question stays; observability that only adds surface does not.
 """
 
 from __future__ import annotations
@@ -48,7 +54,6 @@ from simon.agent.middleware import (
     limits,
     model_retry,
     pii,
-    refusal,
     serving_model,
     summarize,
     todo,
@@ -75,7 +80,6 @@ def build_middleware() -> list:
         summarize.build(),
         todo.build(),
         serving_model.serving_model_middleware,
-        refusal.refusal_signal_middleware,
     ]
     LOGGER.info(
         "middleware stack (%d): %s",
@@ -109,5 +113,4 @@ def middleware_summary() -> list[dict[str, str]]:
         {"name": "Summarization", "detail": f"trigger=tokens:{summarize.SUMMARIZE_AT_TOKENS}"},
         {"name": "TodoList", "detail": "framework default, model decides"},
         {"name": "ServingModel", "detail": "records which model answered"},
-        {"name": "RefusalSignal", "detail": "heuristic, records only"},
     ]
