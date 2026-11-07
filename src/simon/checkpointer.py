@@ -243,6 +243,21 @@ def candidate_dsns(configured: str, settings) -> list[str]:
     return out
 
 
+def shared_checkpointer():
+    """The checkpointer the lifespan already warmed, for SYNCHRONOUS callers.
+
+    ``get_checkpointer()`` is async because resolving a DSN is I/O, and the
+    lifespan awaits it at boot. By the time any request is served the saver
+    exists, so a sync caller can take it without an event loop.
+
+    Returns None before the lifespan has run (a CLI invocation, or a test
+    that never started the app). ``build_agent(checkpointer=None)`` then gets
+    a fresh per-graph memory, which is the honest outcome: no shared thread
+    state, and no pretended persistence.
+    """
+    return _checkpointer
+
+
 async def get_checkpointer():
     """Return the shared checkpointer, creating it on first use.
 

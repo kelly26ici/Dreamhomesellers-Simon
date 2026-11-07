@@ -41,6 +41,7 @@ from simon.agent.graph import build_agent
 from simon.agent.middleware.serving_model import serving_model_id
 from simon.agent.providers import primary_model
 from simon.agent.runtime import converse
+from simon.checkpointer import get_checkpointer
 from simon.server import auth, protocol
 from simon.server.cards import cards_from_tool_result, merge_cards
 from simon.server.page_context import PageContext, context_digest
@@ -73,7 +74,6 @@ async def lifespan(_: FastAPI):
     probe, and a bad POSTGRES_DSN is visible in the deploy log immediately
     instead of after the first visitor message.
     """
-    from simon.checkpointer import get_checkpointer
 
     await get_checkpointer()
     # Says, in the deploy log, whether the service is open or authenticated.
@@ -140,19 +140,22 @@ class AuxRequest(BaseModel):
     timeout_seconds: float = Field(default=8.0, ge=1.0, le=15.0)
 
 
-async def make_agent():
+def make_agent():
     """One agent per request, but sharing the process-wide checkpointer.
 
     The agent object itself is cheap to rebuild; the checkpointer is the
     expensive, stateful part and must NOT be per-request — that is what made
     ``thread_id`` decorative and multi-turn questions unanswerable.
-    ``simon.checkpointer`` owns the shared saver (AsyncPostgresSaver in
-    production, degrading to per-process memory with a logged reason when no
-    DSN is reachable).
-    """
-    from simon.checkpointer import get_checkpointer
 
-    return await build_agent(checkpointer=await get_checkpointer())
+    SYNCHRONOUS, and it reads the saver the lifespan already warmed rather
+    than resolving its own. Construction performs no I/O, so awaiting here
+    would be wrong: an async def returning a non-awaited coroutine hands the
+    route a coroutine instead of a graph, and /api/chat answers 500. That
+    exact bug shipped once.
+    """
+    from simon.checkpointer import shared_checkpointer
+
+    return build_agent(checkpointer=shared_checkpointer())
 
 
 async def _probe_model() -> str:
@@ -228,7 +231,7 @@ async def chat(req: ChatRequest) -> dict[str, Any]:
             seen=seen_listing_ids,
         )
 
-    agent = await make_agent()
+    agent = make_agent()
     try:
         answer = await asyncio.wait_for(
             converse(
@@ -276,7 +279,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
     async def event_gen() -> AsyncIterator[str]:
         conversation_id = req.conversation_id or str(uuid.uuid4())
         prompt = req.message + context_digest(req.page_context)
-        agent = await make_agent()
+        agent = make_agent()
         parts: list[str] = []
         queue: asyncio.Queue[str] = asyncio.Queue(maxsize=1024)
         SENTINEL = "__SIMON_STREAM_DONE__"

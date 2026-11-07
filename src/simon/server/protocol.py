@@ -230,7 +230,7 @@ async def _execute_run(run: _Run, params: RunStartParams) -> None:
             page_context_from_metadata(params.metadata)
         )
 
-        agent = await build_agent(checkpointer=await get_checkpointer())
+        agent = build_agent(checkpointer=await get_checkpointer())
 
         cards: list[dict] = []
         seen_listing_ids: set[str] = set()
