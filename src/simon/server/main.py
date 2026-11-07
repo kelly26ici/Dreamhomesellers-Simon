@@ -193,7 +193,6 @@ async def health() -> dict[str, Any]:
     # health route reported the resolved provider, which kept saying
     # "nvidia" while every turn was served by the third model in the chain.
     from simon.agent.middleware import middleware_summary
-    from simon.agent.middleware.refusal import refusal_signalled
 
     return {
         "status": "ok" if ready else "degraded",
@@ -201,7 +200,6 @@ async def health() -> dict[str, Any]:
         "tools": len(TOOLS),
         "provider": provider,
         "serving_model": serving_model_id(),
-        "refusal_signal": refusal_signalled(),
         "middleware": middleware_summary(),
         "memory": "postgres" if is_persistent() else "process",
         "memory_detail": fallback_reason(),
