@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import suppress
 from typing import TYPE_CHECKING
 from urllib.parse import quote, urlparse
 
@@ -71,7 +72,7 @@ RETENTION_DAYS = 7
 CONNECT_ATTEMPTS = 3
 CONNECT_BACKOFF_SECONDS = 2.0
 
-_checkpointer: "AsyncPostgresSaver | None" = None
+_checkpointer: AsyncPostgresSaver | None = None
 _checkpointer_ctx = None
 _fallback_reason: str | None = None
 # Set once every candidate has failed, so a service that already knows it is
@@ -136,7 +137,10 @@ def _resolve_pool_password(configured: str, settings) -> tuple[str, str]:
     """
     global _last_password_source
     declared = getattr(settings, "supabase_db_password", None)
-    declared = declared.get_secret_value() if hasattr(declared, "get_secret_value") else str(declared or "")
+    if hasattr(declared, "get_secret_value"):
+        declared = declared.get_secret_value()
+    else:
+        declared = str(declared or "")
     if declared.strip():
         _last_password_source = "SUPABASE_DB_PASSWORD"
         return declared, _last_password_source
@@ -192,7 +196,11 @@ def candidate_dsns(configured: str, settings) -> list[str]:
     # a pooler user whose username is not in the pooler form, so prefer the
     # database carried by the pooler DSN when the env names none.
     _, _, dsn_database = _dsn_credentials(configured)
-    database = str(getattr(settings, "supabase_db_name", "") or "").strip() or dsn_database or "postgres"
+    database = (
+        str(getattr(settings, "supabase_db_name", "") or "").strip()
+        or dsn_database
+        or "postgres"
+    )
 
     # Host + user are enough to form a candidate. A password is deliberately NOT
     # required: trust/peer/iam-authenticated clusters have none, and demanding
@@ -291,11 +299,11 @@ async def get_checkpointer():
             except Exception as exc:  # noqa: BLE001 - any failure must degrade, not crash
                 # The generator may have opened a connection before failing;
                 # unwind it so the socket is not leaked into the next attempt.
+                # If unwinding itself fails there is nothing left to do with
+                # that error: the connection is already gone.
                 if ctx is not None:
-                    try:
+                    with suppress(Exception):
                         await ctx.__aexit__(type(exc), exc, exc.__traceback__)
-                    except Exception:  # noqa: BLE001
-                        pass
                 failures.append(f"{_host_port_of(dsn)}: {type(exc).__name__}")
                 # A refused or unreachable socket is worth one more try (a cold
                 # database answers in seconds); an authentication failure is not,
@@ -364,9 +372,9 @@ async def close_checkpointer() -> None:
     """Exit the connection-pool context manager on shutdown."""
     global _checkpointer, _checkpointer_ctx
     if _checkpointer_ctx is not None:
-        try:
+        # Shutdown must not raise: a failing close is logged nowhere and
+        # matters less than exiting cleanly.
+        with suppress(Exception):
             await _checkpointer_ctx.__aexit__(None, None, None)
-        except Exception:  # noqa: BLE001 - shutdown must not raise
-            pass
     _checkpointer = None
     _checkpointer_ctx = None

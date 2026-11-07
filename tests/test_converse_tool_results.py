@@ -18,7 +18,7 @@ from simon.agent import converse
 class _Deltas:
     """Async channel that closes after writing the terminal result."""
 
-    def __init__(self, call: "_Call") -> None:
+    def __init__(self, call: _Call) -> None:
         self._call = call
         self._delivered = False
 

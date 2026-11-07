@@ -74,13 +74,16 @@ class SearchPropertiesArgs(BaseModel):
     )
 
     @model_validator(mode="after")
-    def _sane(self) -> "SearchPropertiesArgs":
-        if self.min_price is not None and self.max_price is not None:
-            if self.min_price > self.max_price:
-                raise ValueError(
-                    "min_price cannot be higher than max_price — narrow the "
-                    "band or widen it."
-                )
+    def _sane(self) -> SearchPropertiesArgs:
+        if (
+            self.min_price is not None
+            and self.max_price is not None
+            and self.min_price > self.max_price
+        ):
+            raise ValueError(
+                "min_price cannot be higher than max_price — narrow the "
+                "band or widen it."
+            )
         if self.deal is not None and self.deal.lower() not in DEAL_VALUES:
             raise ValueError(
                 f"deal must be one of {', '.join(DEAL_VALUES)}; got "

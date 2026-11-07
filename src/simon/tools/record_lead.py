@@ -80,7 +80,7 @@ class RecordLeadArgs(BaseModel):
         return kind
 
     @model_validator(mode="after")
-    def _trimmed(self) -> "RecordLeadArgs":
+    def _trimmed(self) -> RecordLeadArgs:
         self.customer_phone = self.customer_phone.strip()
         if self.customer_name is not None:
             self.customer_name = self.customer_name.strip() or None

@@ -25,11 +25,11 @@ from __future__ import annotations
 
 import inspect
 import re
-from typing import Any, Callable, get_type_hints
-
-from pydantic import BaseModel, ValidationError
+from collections.abc import Callable
+from typing import Any, get_type_hints
 
 from langchain.tools import tool
+from pydantic import BaseModel, ValidationError
 
 # Result caps. Browse and compare stay deliberately small: a chat turn that
 # renders twenty properties is unusable, and the buyer can always ask for more.
@@ -155,13 +155,11 @@ def _is_dialstring(value: str) -> bool:
     """
     text = value.strip()
     digits = sum(ch.isdigit() for ch in text)
-    if digits < _MIN_PHONE_DIGITS:
-        return False
-    if _YEAR.match(text):
-        return False
-    if _MONEY.search(text):
-        return False
-    return True
+    return (
+        digits >= _MIN_PHONE_DIGITS
+        and not _YEAR.match(text)
+        and not _MONEY.search(text)
+    )
 
 
 def assert_no_contact(payload: Any, *, where: str) -> Any:

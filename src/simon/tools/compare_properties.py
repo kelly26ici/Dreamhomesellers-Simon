@@ -30,7 +30,7 @@ class ComparePropertiesArgs(BaseModel):
     )
 
     @model_validator(mode="after")
-    def _unique(self) -> "ComparePropertiesArgs":
+    def _unique(self) -> ComparePropertiesArgs:
         seen = [i.strip() for i in self.property_ids]
         if len(set(seen)) != len(seen):
             raise ValueError(
