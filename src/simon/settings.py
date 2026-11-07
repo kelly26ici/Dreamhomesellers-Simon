@@ -103,6 +103,14 @@ class Settings(BaseSettings):
     simon_shared_secret: SecretStr = SecretStr("")
     port: int = 8787
 
+    # ---- Middleware behaviour (LangChain ModelRetry/ToolRetry) --------------
+    # Bound tightly. Every retry is a paid provider call, and a buyer waiting
+    # on a turn that is quietly retrying three times is a buyer leaving.
+    model_max_retries: int = 2
+    model_backoff_factor: float = 2.0
+    model_initial_delay: float = 1.0
+    model_max_delay: float = 8.0
+
     # ---- Observability ---------------------------------------------------
     langsmith_tracing: bool = False
     langsmith_api_key: SecretStr = SecretStr("")
