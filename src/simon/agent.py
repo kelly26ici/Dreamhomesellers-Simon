@@ -9,7 +9,7 @@ import httpx
 from langchain.agents import create_agent
 from langchain.chat_models import init_chat_model
 
-from simon.settings import get_model_settings, get_observability_settings
+from simon.settings import get_settings
 from simon.tools import TOOLS
 
 LOGGER = logging.getLogger("simon.agent")
@@ -45,7 +45,7 @@ and offer to record a lead for the sales team to follow up."""
 
 
 def wire_tracing():
-    mine = get_observability_settings()
+    mine = get_settings()
     if mine.langsmith_tracing and mine.langsmith_api_key.get_secret_value():
         os.environ["LANGSMITH_TRACING"] = "true"
         os.environ["LANGSMITH_API_KEY"] = (
@@ -86,7 +86,7 @@ def _http_client() -> httpx.Client:
 
 def _provider_model(provider: str):
     """Build the chat model for one provider, or None when unconfigured."""
-    mine = get_model_settings()
+    mine = get_settings()
     if provider == "nvidia":
         key = mine.nvidia_api_key.get_secret_value()
         if key:

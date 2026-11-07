@@ -1,70 +1,70 @@
+"""Process-wide settings, resolved once.
+
+One Settings class replaces the previous three (PoolSettings, ModelSettings,
+ObservabilitySettings). They read the same `.env` file, the same way, so the
+split created three independent env parses and three cache keys for what is
+conceptually one configuration object -- and it made a setting's home
+ambiguous, which is how `luxonn_site_url` ended up in the pool group despite
+having nothing to do with pooling.
+
+Every environment variable name from the previous classes is preserved
+verbatim, so nothing in the Render dashboard or `.env` needs to change.
+"""
+
+from __future__ import annotations
+
 from functools import lru_cache
 
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# (env key for the API key, default model id) in FALLBACK ORDER. A provider
+# with no key configured is skipped, never a runtime failure.
+MODEL_PROVIDER_DEFAULTS: tuple[tuple[str, str], ...] = (
+    ("nvidia", "nvidia/nemotron-3.5-lightning-30b-a3b"),
+    ("poolside", "laguna-s-2.1"),
+    ("groq", "openai/gpt-oss-120b"),
+)
 
-class PoolSettings(BaseSettings):
+
+class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", extra="ignore"
     )
 
+    # ---- Supabase / database -------------------------------------------
     supabase_url: str = ""
     supabase_key: SecretStr = SecretStr("")
     # The checkpointer's Postgres DSN. Render's dashboard historically names
-    # this variable DATABASE_URL, and the deployed Simon service DOES define
-    # DATABASE_URL and DOES NOT define POSTGRES_DSN — so reading only
+    # this DATABASE_URL, and the deployed Simon service DOES define
+    # DATABASE_URL and DOES NOT define POSTGRES_DSN -- so reading only
     # POSTGRES_DSN silently yields an empty string and the checkpointer
     # "degrades" for a reason that never appears in the code. Both names are
-    # accepted here, POSTGRES_DSN winning on purpose (it is the explicit one).
+    # accepted, POSTGRES_DSN winning on purpose (it is the explicit one).
     postgres_dsn: SecretStr = SecretStr("")
     database_url: SecretStr = SecretStr("")
     # Supabase pooler coordinates. Read so the checkpointer can assemble a
-    # reachable DSN when the configured one points at the IPv6-only direct host
-    # (db.<ref>.supabase.co has no A record on any Supabase plan; an IPv4
-    # address for it is a Pro-plan add-on).
+    # reachable DSN when the configured one points at the IPv6-only direct
+    # host (db.<ref>.supabase.co has no A record on any Supabase plan; an IPv4
+    # address for it is a Pro-plan add-on). Note for anyone reading this on a
+    # machine with no IPv6: none of these hostnames resolve there, which is
+    # why production migrations are applied from the Supabase dashboard.
     supabase_pooler_host: str = ""
     supabase_pooler_port: str = ""
     supabase_pooler_user: str = ""
-    # Supabase ships this DSN, and it is the only place the pooler-form username
-    # + password appear together — which is what a pooler connection must send.
     supabase_pooler_url: SecretStr = SecretStr("")
     supabase_db_host: str = ""
     supabase_db_password: SecretStr = SecretStr("")
     supabase_db_name: str = ""
     supabase_project_region: str = ""
+
+    # ---- Vector search --------------------------------------------------
     qdrant_url: str = ""
     qdrant_api_key: SecretStr = SecretStr("")
-    # The companion website's Render base URL. Read by src/simon/keepalive.py to
-    # give that service inbound traffic, which is the only thing that keeps a
-    # free Render web service from spinning down. Empty = keep-alive disabled,
-    # which is the right default for a local run.
-    luxonn_site_url: str = ""
     cloudflare_account_id: str = ""
     cloudflare_api_token: SecretStr = SecretStr("")
 
-    @property
-    def resolved_postgres_dsn(self) -> str:
-        """POSTGRES_DSN if set, else DATABASE_URL, else empty.
-
-        Resolved explicitly rather than with a pydantic ``validation_alias``:
-        the two names mean the same thing here, but which one the platform
-        injects is an accident of deploy history — and a silent empty default is
-        the least debuggable of the possibilities.
-        """
-        for name in ("postgres_dsn", "database_url"):
-            value = getattr(self, name)
-            if value is not None and value.get_secret_value():
-                return value.get_secret_value()
-        return ""
-
-
-class ModelSettings(BaseSettings):
-    model_config = SettingsConfigDict(
-        env_file=".env", env_file_encoding="utf-8", extra="ignore"
-    )
-
-    llm_model: str = "poolside/laguna-s-2.1"
+    # ---- Model providers (fallback order is MODEL_PROVIDER_DEFAULTS) -----
     nvidia_api_key: SecretStr = SecretStr("")
     nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"
     gemini_api_key: SecretStr = SecretStr("")
@@ -72,28 +72,83 @@ class ModelSettings(BaseSettings):
     poolside_api_key: SecretStr = SecretStr("")
     poolside_base_url: str = "https://api.poolside.ai/v1"
     openrouter_api_key: SecretStr = SecretStr("")
+    # The historical primary-model override. Kept so an existing deployment
+    # that sets it keeps working; ordering now lives in
+    # MODEL_PROVIDER_DEFAULTS and is serialised by `model_chain()`.
+    llm_model: str = "poolside/laguna-s-2.1"
 
+    # ---- Service surface -------------------------------------------------
+    # The companion website's Render base URL. Read by keepalive.py to give
+    # that service inbound traffic -- the only thing that keeps a free Render
+    # web service from spinning down. Empty = keep-alive disabled.
+    luxonn_site_url: str = ""
+    # CORS. Empty means same-origin only, which is the correct default in
+    # production: this service is called by the website's server-side relay,
+    # not by browsers directly. The previous hardcoded localhost list was both
+    # dead in production and a deploy blocker.
+    cors_allowed_origins: str = ""
+    # Shared secret callers must present as a header. Without it every
+    # endpoint -- including the bounded /api/aux model call -- is an open LLM
+    # proxy on a public host. Empty = authentication disabled, which is only
+    # acceptable for a local run.
+    shared_secret: SecretStr = SecretStr("")
+    port: int = 8787
 
-class ObservabilitySettings(BaseSettings):
-    model_config = SettingsConfigDict(
-        env_file=".env", env_file_encoding="utf-8", extra="ignore"
-    )
-
+    # ---- Observability ---------------------------------------------------
     langsmith_tracing: bool = False
     langsmith_api_key: SecretStr = SecretStr("")
     langsmith_project: str = "simon"
 
+    # ---- Derived helpers --------------------------------------------------
 
-@lru_cache
-def get_pool_settings() -> PoolSettings:
-    return PoolSettings()
+    @property
+    def resolved_postgres_dsn(self) -> str:
+        """POSTGRES_DSN if set, else DATABASE_URL, else empty.
+
+        Resolved explicitly rather than with a pydantic ``validation_alias``:
+        the two names mean the same thing here, but which one the platform
+        injects is an accident of deploy history -- and a silent empty default
+        is the least debuggable of the possibilities.
+        """
+        for name in ("postgres_dsn", "database_url"):
+            value = getattr(self, name)
+            if value is not None and value.get_secret_value():
+                return value.get_secret_value()
+        return ""
+
+    @property
+    def cors_origins(self) -> list[str]:
+        """Parsed CORS_ALLOWED_ORIGINS. Empty list = same-origin only."""
+        raw = self.cors_allowed_origins.strip()
+        if not raw:
+            return []
+        return [origin.strip() for origin in raw.split(",") if origin.strip()]
+
+    def api_key_for(self, provider: str) -> str:
+        """The configured API key for a provider, or empty when unconfigured."""
+        key = getattr(self, f"{provider}_api_key", None)
+        return key.get_secret_value() if key else ""
+
+    def model_override_for(self, provider: str) -> str:
+        """A per-provider model override, e.g. SIMON_GROQ_MODEL, or empty.
+
+        `.env.example` documented these names but no code ever read them;
+        they become real here so swapping a dead provider is an env change and
+        not a code change.
+        """
+        return getattr(self, f"simon_{provider}_model", "") or ""
 
 
-@lru_cache
-def get_model_settings() -> ModelSettings:
-    return ModelSettings()
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    """The one settings object. Cached once per process, never per request."""
+    return Settings()
 
 
-@lru_cache
-def get_observability_settings() -> ObservabilitySettings:
-    return ObservabilitySettings()
+# Historical name, kept importable. `PoolSettings` was the first of the three
+# classes consolidated into `Settings`; the checkpointer tests build instances
+# directly with `_env_file=""` to isolate them from the real `.env`, and they
+# construct `PoolSettings(...)` by name. Aliasing keeps those tests honest
+# instead of rewriting 28 call sites to chase a rename.
+PoolSettings = Settings
+
