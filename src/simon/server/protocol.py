@@ -63,7 +63,8 @@ from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from simon.agent import build_agent, converse
+from simon.agent.graph import build_agent
+from simon.agent.runtime import converse
 from simon.server.cards import cards_from_tool_result, merge_cards
 from simon.server.page_context import context_digest, page_context_from_metadata
 

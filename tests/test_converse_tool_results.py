@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from simon.agent import converse
+from simon.agent.runtime import converse
 
 
 class _Deltas:

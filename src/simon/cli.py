@@ -2,7 +2,8 @@ import asyncio
 import sys
 import uuid
 
-from simon.agent import build_agent, converse
+from simon.agent.graph import build_agent
+from simon.agent.runtime import converse
 
 
 def main():

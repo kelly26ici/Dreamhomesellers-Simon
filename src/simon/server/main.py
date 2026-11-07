@@ -37,7 +37,10 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from simon import keepalive
-from simon.agent import build_agent, build_model, converse
+from simon.agent.graph import build_agent
+from simon.agent.middleware.serving_model import serving_model_id
+from simon.agent.providers import primary_model
+from simon.agent.runtime import converse
 from simon.server import auth, protocol
 from simon.server.cards import cards_from_tool_result, merge_cards
 from simon.server.page_context import PageContext, context_digest
@@ -155,12 +158,13 @@ async def make_agent():
 async def _probe_model() -> str:
     """Cheap readiness signal: can a model actually be constructed?
 
-    Constructing the chat model performs no API call, but it fails loudly when
-    no provider key is configured — which is precisely the state the old static
-    {"status":"ok"} hid. Returns the resolved provider name, or a reason string.
+    Constructing the chat model performs no API call — nothing is probed any
+    more — but it fails loudly when no provider key is configured, which is
+    precisely the state the old static {"status":"ok"} hid. Returns the resolved
+    model id, or a reason string.
     """
     try:
-        model = build_model()
+        model = primary_model()
     except Exception as exc:  # noqa: BLE001 - report, never 500 the health route
         return f"unconfigured ({type(exc).__name__})"
     for attr in ("model", "model_name"):
@@ -182,11 +186,20 @@ async def health() -> dict[str, Any]:
 
     provider = await _probe_model()
     ready = provider and not provider.startswith("unconfigured")
+    # Which model last ANSWERED, not which one is configured to. The old
+    # health route reported the resolved provider, which kept saying
+    # "nvidia" while every turn was served by the third model in the chain.
+    from simon.agent.middleware import middleware_summary
+    from simon.agent.middleware.refusal import refusal_signalled
+
     return {
         "status": "ok" if ready else "degraded",
         "service": "simon",
         "tools": len(TOOLS),
         "provider": provider,
+        "serving_model": serving_model_id(),
+        "refusal_signal": refusal_signalled(),
+        "middleware": middleware_summary(),
         "memory": "postgres" if is_persistent() else "process",
         "memory_detail": fallback_reason(),
     }
@@ -228,16 +241,15 @@ async def chat(req: ChatRequest) -> dict[str, Any]:
         )
     except TimeoutError as exc:
         # A turn that exhausts its budget is evidence about the PROVIDER, not
-        # about the question. Cool it down so the next request falls through to
-        # a live one instead of paying another 45s to learn the same thing.
-        # Health probes once per boot, so without this a provider that degrades
-        # mid-life pins the service until restart.
+        # about the question. The framework's ModelRetry and ModelFallback
+        # re-select on the next turn, so the honest action here is only to stop
+        # claiming to know who served.
         try:
-            from simon.agent import active_provider_name, mark_provider_unavailable
+            from simon.agent.middleware.serving_model import reset_serving_model
 
-            name = active_provider_name()
-            if name:
-                mark_provider_unavailable(name)
+            # Framework fallback re-selects on the next turn. This only
+            # stops the service claiming to know who served.
+            reset_serving_model()
         except Exception:  # noqa: BLE001 - never mask the 504 with a bookkeeping error
             LOGGER.warning("could not cool down the provider after a timeout",
                            exc_info=True)
@@ -335,12 +347,12 @@ async def aux(req: AuxRequest) -> dict[str, Any]:
     out of the answer; Simon owns provider selection. No tools are bound and
     no checkpoint is read or written, so this cannot mutate a conversation.
 
-    `build_model()` probes providers synchronously (up to 12s each), so it is
-    moved off the event loop. The invoke itself is capped by the caller's
+    `primary_model()` construction performs no API call and no probe, so it is
+    safe on the event loop. The invoke itself is capped by the caller's
     timeout so a dead provider fails the metadata call instead of the page.
     """
     try:
-        model = await asyncio.to_thread(build_model)
+        model = primary_model()
     except Exception as exc:  # noqa: BLE001 - report as unavailable
         LOGGER.warning("aux: no model available: %s", exc)
         raise HTTPException(status_code=503, detail="model unavailable") from exc
