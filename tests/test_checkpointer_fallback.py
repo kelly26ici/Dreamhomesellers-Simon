@@ -237,7 +237,7 @@ async def test_unreachable_configured_dsn_degrades_with_a_precise_reason(monkeyp
     /api/health is actionable instead of reporting a bare class name."""
     mod = importlib.import_module("simon.checkpointer")
     monkeypatch.setattr(
-        mod, "get_pool_settings",
+        mod, "get_settings",
         lambda: PoolSettings(postgres_dsn=_dsn("127.0.0.1", 1)),  # port 1: refused
     )
     monkeypatch.setattr(mod, "CONNECT_ATTEMPTS", 1)
@@ -259,7 +259,7 @@ async def test_failure_locks_so_later_requests_do_not_reconnect(monkeypatch):
     cost again on every visitor message."""
     mod = importlib.import_module("simon.checkpointer")
     monkeypatch.setattr(
-        mod, "get_pool_settings",
+        mod, "get_settings",
         lambda: PoolSettings(
             postgres_dsn="postgresql://u:p@127.0.0.1:1/postgres",  # no pooler info
         ),

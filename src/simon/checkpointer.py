@@ -24,7 +24,7 @@ the next:
    ``POSTGRES_DSN``. Reading one hardcoded name therefore returned an empty
    string, and the "DSN is not set" branch burned the whole chain — the real
    Postgres coordinates were present in the environment the entire time.
-   Fixed in ``PoolSettings.resolved_postgres_dsn``.
+   Fixed in ``Settings.resolved_postgres_dsn``.
 
 2. Supabase's DIRECT host (``db.<ref>.supabase.co``) has no A record on ANY plan:
    it resolves to IPv6 only (``2a05:d018:…``). An IPv4 address for it is a paid
@@ -51,7 +51,7 @@ import logging
 from typing import TYPE_CHECKING
 from urllib.parse import quote, urlparse
 
-from simon.settings import get_pool_settings
+from simon.settings import get_settings
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
@@ -256,8 +256,8 @@ async def get_checkpointer():
         # don't pay the connection cost again on every request.
         return _build_memory()
 
-    settings = get_pool_settings()
-    # POSTGRES_DSN or DATABASE_URL — see PoolSettings.resolved_postgres_dsn. The
+    settings = get_settings()
+    # POSTGRES_DSN or DATABASE_URL — see Settings.resolved_postgres_dsn. The
     # deployed service defines only DATABASE_URL, so reading one hardcoded name
     # is what made this look like an environment problem.
     configured = settings.resolved_postgres_dsn

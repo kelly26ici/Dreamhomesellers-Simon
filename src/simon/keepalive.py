@@ -24,7 +24,7 @@ import logging
 
 import httpx
 
-from simon.settings import get_pool_settings
+from simon.settings import get_settings
 
 LOGGER = logging.getLogger("simon.keepalive")
 
@@ -39,7 +39,7 @@ TIMEOUT = httpx.Timeout(120.0, connect=15.0)
 
 async def _ping_forever() -> None:
     """One GET per cycle, forever. Every failure is logged and swallowed."""
-    settings = get_pool_settings()
+    settings = get_settings()
     url = f"{settings.luxonn_site_url.rstrip('/')}{HEALTH_PATH}"
     LOGGER.info("keep-alive: pinging %s every %ds", url, INTERVAL_SECONDS)
 
@@ -62,7 +62,7 @@ def start() -> asyncio.Task | None:
     Returning None keeps a local ``uv run`` (no LUXONN_SITE_URL) from creating a
     loop that cannot work, and keeps the lifespan shutdown path unconditional.
     """
-    if not get_pool_settings().luxonn_site_url:
+    if not get_settings().luxonn_site_url:
         LOGGER.info("keep-alive disabled: LUXONN_SITE_URL is not set")
         return None
     return asyncio.create_task(_ping_forever())

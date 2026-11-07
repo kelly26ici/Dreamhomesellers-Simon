@@ -37,8 +37,10 @@ from pydantic import BaseModel, Field
 
 from simon import keepalive
 from simon.agent import build_agent, build_model, converse
+from simon.server import auth, protocol
 from simon.server.cards import cards_from_tool_result, merge_cards
 from simon.server.page_context import PageContext, context_digest
+from simon.settings import get_settings
 from simon.tools import TOOLS
 
 async def _prune_loop():
@@ -69,6 +71,9 @@ async def lifespan(_: FastAPI):
     from simon.checkpointer import get_checkpointer
 
     await get_checkpointer()
+    # Says, in the deploy log, whether the service is open or authenticated.
+    # A production deploy with no SHARED_SECRET is otherwise silent.
+    auth.warn_if_disabled()
     prune_task = asyncio.create_task(_prune_loop())
     keepalive_task = keepalive.start()
     try:
@@ -87,20 +92,24 @@ async def lifespan(_: FastAPI):
 # talk to Simon at all. Mounted here so it shares the app's CORS and
 # lifespan (the checkpointer it reads runs state.get against the same
 # singleton /api/chat writes).
-from simon.server import protocol
 
 LOGGER = logging.getLogger("simon.server")
 
 app = FastAPI(title="Simon concierge service", version="0.1.0", lifespan=lifespan)
 app.include_router(protocol.router)
 
+# CORS is env-driven. The previous hardcoded localhost list was dead in
+# production (nothing on Render sends an Origin of localhost:3000) and a
+# deploy blocker. Empty means same-origin only, which is the correct default:
+# this service is called by the website's server-side relay, not by browsers.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=get_settings().cors_origins,
     allow_credentials=False,
     allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type"],
+    allow_headers=["Content-Type", "x-simon-secret"],
 )
+app.add_middleware(auth.SharedSecretMiddleware)
 
 
 class ChatRequest(BaseModel):
