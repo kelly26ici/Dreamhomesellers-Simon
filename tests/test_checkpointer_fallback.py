@@ -128,7 +128,8 @@ def test_pooler_adds_session_mode_before_transaction_mode():
     )
     out = candidate_dsns("postgresql://user:pass@db.ref.supabase.co:5432/postgres", s)
     assert out[0] == "postgresql://user:pass@db.ref.supabase.co:5432/postgres"
-    assert "postgresql://postgres.ref:pw@ref.aws-0-eu-west-1.pooler.supabase.com:5432/postgres" in out
+    pooler = "postgresql://postgres.ref:pw@ref.aws-0-eu-west-1.pooler.supabase.com:5432/postgres"
+    assert pooler in out
     pooler = [u for u in out if "pooler.supabase.com" in u]
     ports = [int(p.rsplit(":", 1)[1].split("/")[0]) for p in pooler]
     assert 5432 in ports
@@ -164,7 +165,8 @@ def test_pooler_credentials_are_url_escaped_when_password_has_specials():
     # configured first, then the pooler on the port it advertises
     assert out[0] == _dsn("db.ref.supabase.co", 5432)
     # the pooler candidates carry the POOLER credentials, not the configured ones
-    assert "postgresql://postgres.ref:pw@ref.aws-0-eu-west-1.pooler.supabase.com:5432/postgres" in out
+    pooler = "postgresql://postgres.ref:pw@ref.aws-0-eu-west-1.pooler.supabase.com:5432/postgres"
+    assert pooler in out
     pooler_ports = [
         urlparse(p).port
         for p in out

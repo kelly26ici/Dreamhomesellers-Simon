@@ -27,9 +27,10 @@ import asyncio
 import json
 import logging
 import uuid
-from typing import Any, AsyncIterator
-
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -42,6 +43,7 @@ from simon.server.cards import cards_from_tool_result, merge_cards
 from simon.server.page_context import PageContext, context_digest
 from simon.settings import get_settings
 from simon.tools import TOOLS
+
 
 async def _prune_loop():
     """Periodically drop checkpoints past the retention window.
@@ -224,7 +226,7 @@ async def chat(req: ChatRequest) -> dict[str, Any]:
             ),
             timeout=45,
         )
-    except asyncio.TimeoutError as exc:
+    except TimeoutError as exc:
         # A turn that exhausts its budget is evidence about the PROVIDER, not
         # about the question. Cool it down so the next request falls through to
         # a live one instead of paying another 45s to learn the same thing.
@@ -283,7 +285,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                     ),
                     timeout=45,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 # Distinguishable from a failed turn: the website treats a
                 # timeout as "the agent is thinking, retry" rather than
                 # "the agent is down", and silently reporting the generic
@@ -347,7 +349,7 @@ async def aux(req: AuxRequest) -> dict[str, Any]:
         result = await asyncio.wait_for(
             model.ainvoke(req.prompt), timeout=req.timeout_seconds
         )
-    except asyncio.TimeoutError as exc:
+    except TimeoutError as exc:
         raise HTTPException(status_code=504, detail="aux timed out") from exc
     except Exception as exc:  # noqa: BLE001 - one retry belongs to the caller
         LOGGER.warning("aux: model call failed: %s", exc)

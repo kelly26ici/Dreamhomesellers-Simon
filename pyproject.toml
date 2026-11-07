@@ -2,7 +2,7 @@
 name = "simon"
 version = "0.1.0"
 description = "Simon — the Dreamhomesellers property concierge. A LangChain v1 agent that helps buyers search and filter listings, and helps sellers post them, on top of the shared property pool."
-readme = "README.md"
+readme = "AGENTS.md"
 authors = [
     { name = "kelly26ici", email = "rexk638@gmail.com" }
 ]
@@ -27,10 +27,11 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    "chainlit==2.12.0",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
     "pytest-timeout>=2.4.0",
+    "respx>=0.22.0",
+    "ruff>=0.8.0",
 ]
 
 [project.scripts]
@@ -44,3 +45,17 @@ build-backend = "uv_build"
 testpaths = ["tests"]
 asyncio_mode = "auto"
 filterwarnings = ["error::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+# E/F are the correctness floor. I is import order. UP is py3.13 modernity.
+# B is bugbear, which catches the mutable-default and except-pass classes of
+# mistake that survive review. SIM keeps the code honest without contorting it.
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests are allowed to import in any order and to shadow names for clarity.
+"tests/*" = ["E402", "B008"]

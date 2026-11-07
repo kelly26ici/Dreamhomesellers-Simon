@@ -56,14 +56,16 @@ import json
 import logging
 import time
 import uuid
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
+
+from fastapi import APIRouter, Request
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 
 from simon.agent import build_agent, converse
 from simon.server.cards import cards_from_tool_result, merge_cards
 from simon.server.page_context import context_digest, page_context_from_metadata
-from fastapi import APIRouter, Request
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
 
 LOGGER = logging.getLogger("simon.server.protocol")
 
@@ -130,11 +132,10 @@ def _publish(run: _Run, channel: str, data: dict) -> None:
         if q.full():
             continue
         q.put_nowait((seq, channel, data))
-        if terminal:
-            # The run is over, so this thread has no more events to give. Close
-            # the stream rather than leaving every subscriber parked on get().
-            if not q.full():
-                q.put_nowait(None)
+        if terminal and not q.full():
+            # The run is over, so this thread has no more events to give.
+            # Close the stream rather than leaving subscribers parked on get().
+            q.put_nowait(None)
 
 
 def _replay_since(thread_id: str, last_event_id: int) -> list[tuple[int, str, dict]]:
@@ -205,8 +206,16 @@ async def _execute_run(run: _Run, params: RunStartParams) -> None:
     from simon.checkpointer import get_checkpointer
 
     try:
-        _publish(run, "lifecycle", {"event": "started", "namespace": [], "graphName": "simon"})
-        _publish(run, "messages", {"event": "message-start", "id": f"msg_{run.run_id}", "role": "ai"})
+        _publish(
+            run,
+            "lifecycle",
+            {"event": "started", "namespace": [], "graphName": "simon"},
+        )
+        _publish(
+            run,
+            "messages",
+            {"event": "message-start", "id": f"msg_{run.run_id}", "role": "ai"},
+        )
 
         text = _message_text(params)
         if not text:
@@ -287,7 +296,11 @@ async def _execute_run(run: _Run, params: RunStartParams) -> None:
             on_tool_result=on_tool_result,
         )
 
-        _publish(run, "messages", {"event": "message-finish", "id": f"msg_{run.run_id}", "role": "ai"})
+        _publish(
+            run,
+            "messages",
+            {"event": "message-finish", "id": f"msg_{run.run_id}", "role": "ai"},
+        )
         _publish(run, "lifecycle", {"event": "completed", "namespace": []})
         _publish(run, "values", {"messages": [{"role": "ai", "content": answer}]})
     except Exception as exc:  # noqa: BLE001 - a run must fail as an event, not a crash

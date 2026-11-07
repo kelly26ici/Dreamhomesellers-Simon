@@ -39,7 +39,16 @@ def client(monkeypatch):
 
     monkeypatch.setattr(proto, "build_agent", fake_build_agent)
 
-    async def fake_converse(agent, message, *, thread_id, on_token=None, on_tool_call=None, on_tool_result=None, **_):
+    async def fake_converse(
+    agent,
+    message,
+    *,
+    thread_id,
+    on_token=None,
+    on_tool_call=None,
+    on_tool_result=None,
+    **_,
+):
         if on_tool_call or on_tool_result:
             class _Call:
                 tool_call_id = "tc_1"
@@ -96,7 +105,10 @@ def test_run_start_returns_a_run_id_without_waiting_for_the_turn(client):
         json={
             "id": 2,
             "method": "run.start",
-            "params": {"assistantId": "agent", "input": {"messages": [{"role": "user", "content": "hi"}]}},
+            "params": {
+                "assistantId": "agent",
+                "input": {"messages": [{"role": "user", "content": "hi"}]},
+            },
         },
     )
     body = r.json()
@@ -110,7 +122,11 @@ def test_second_concurrent_turn_reuses_the_active_run(client):
     platform's one-run-per-thread rule returns the same run instead."""
     first = client.post(
         "/threads/t3/commands",
-        json={"id": 3, "method": "run.start", "params": {"input": {"messages": [{"role": "user", "content": "a"}]}}},
+        json={
+            "id": 3,
+            "method": "run.start",
+            "params": {"input": {"messages": [{"role": "user", "content": "a"}]}},
+        },
     ).json()["result"]["runId"]
 
     # A turn the same length as the stubbed one is already done by now, so
@@ -125,14 +141,21 @@ def test_second_concurrent_turn_reuses_the_active_run(client):
     proto._runs["t3"] = active
     second = client.post(
         "/threads/t3/commands",
-        json={"id": 4, "method": "run.start", "params": {"input": {"messages": [{"role": "user", "content": "b"}]}}},
+        json={
+            "id": 4,
+            "method": "run.start",
+            "params": {"input": {"messages": [{"role": "user", "content": "b"}]}},
+        },
     )
     assert second.json()["result"]["runId"] == active.run_id
     assert first.startswith("run_")
 
 
 def test_state_get_reports_empty_for_unknown_thread(client):
-    r = client.post("/threads/unknown/commands", json={"id": 5, "method": "state.get", "params": {}})
+    r = client.post(
+        "/threads/unknown/commands",
+        json={"id": 5, "method": "state.get", "params": {}},
+    )
     body = r.json()
     assert body["type"] == "success"
     assert body["result"]["values"] == {}
@@ -157,7 +180,11 @@ def test_stream_replays_and_streams_protocol_events(client):
     """Full turn envelope: lifecycle, messages, tools and values, in order."""
     start = client.post(
         "/threads/t4/commands",
-        json={"id": 6, "method": "run.start", "params": {"input": {"messages": [{"role": "user", "content": "hi"}]}}},
+        json={
+            "id": 6,
+            "method": "run.start",
+            "params": {"input": {"messages": [{"role": "user", "content": "hi"}]}},
+        },
     )
     run_id = start.json()["result"]["runId"]
 
@@ -273,7 +300,11 @@ def test_replay_after_last_event_id_does_not_rerun_the_turn(client, monkeypatch)
     monkeypatch.setattr(proto, "converse", counting)
     client.post(
         "/threads/t7/commands",
-        json={"id": 7, "method": "run.start", "params": {"input": {"messages": [{"role": "user", "content": "x"}]}}},
+        json={
+            "id": 7,
+            "method": "run.start",
+            "params": {"input": {"messages": [{"role": "user", "content": "x"}]}},
+        },
     )
 
     with client.stream("POST", "/threads/t7/stream", headers={"Last-Event-ID": "0"}) as resp:
@@ -293,11 +324,20 @@ def test_failed_run_publishes_a_failure_event_rather_than_raising(client, monkey
     monkeypatch.setattr(proto, "converse", boom)
     client.post(
         "/threads/t5/commands",
-        json={"id": 8, "method": "run.start", "params": {"input": {"messages": [{"role": "user", "content": "x"}]}}},
+        json={
+            "id": 8,
+            "method": "run.start",
+            "params": {"input": {"messages": [{"role": "user", "content": "x"}]}},
+        },
     )
     with client.stream("POST", "/threads/t5/stream") as resp:
         datas = _read_sse(resp)
-    failed = [d for d in datas if d["method"] == "lifecycle" and d["params"]["data"].get("event") == "failed"]
+    failed = [
+        d
+        for d in datas
+        if d["method"] == "lifecycle"
+        and d["params"]["data"].get("event") == "failed"
+    ]
     assert failed, "a dead provider is an event the client can render, not a crash"
     assert "provider down" in failed[0]["params"]["data"]["error"]
 

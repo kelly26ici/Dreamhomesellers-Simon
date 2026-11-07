@@ -114,7 +114,7 @@ class ScheduleViewingArgs(BaseModel):
         return value.strip().lower()
 
     @model_validator(mode="after")
-    def _named_or_named_gap(self) -> "ScheduleViewingArgs":
+    def _named_or_named_gap(self) -> ScheduleViewingArgs:
         # A request with no name is still submittable (the owner contacts the
         # number), but a name that is only whitespace is worse than absent.
         if self.customer_name is not None:
