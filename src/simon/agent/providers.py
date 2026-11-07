@@ -6,11 +6,16 @@ ModelRetryMiddleware and ModelFallbackMiddleware do all of that now, and do it
 per call rather than per process, which is what makes a provider that degrades
 mid-session recoverable without a restart.
 
-What is deliberately KEPT from the old implementation: the explicit httpx
-client. `request_timeout` is inert on these integrations -- LangChain copies
-it into model_kwargs and the provider SDK then applies its own 60s socket
-default, which is why a dead NVIDIA endpoint once burned 60s per turn despite
-the setting. An explicit client is the knob that actually bounds the read.
+What is deliberately KEPT from the old implementation: the per-call timeout.
+The old code smuggled an httpx.Client through model_kwargs to bound a slow
+provider, because `request_timeout` is inert on some integrations. That hack
+is gone -- ChatNVIDIA serialises model_kwargs into the request body, so a
+Client in there raised "Object of type Client is not JSON serializable" on
+every call. `request_timeout` is passed to the constructor instead, and
+ModelRetryMiddleware bounds a failure rather than a slow socket.
+
+The timeout is therefore enforced by retry policy, where the framework can
+see it, not by a client hack that broke serialization.
 """
 
 from __future__ import annotations
@@ -18,7 +23,6 @@ from __future__ import annotations
 import logging
 from functools import lru_cache
 
-import httpx
 from langchain.chat_models import init_chat_model
 
 from simon.settings import MODEL_PROVIDER_DEFAULTS, get_settings
@@ -56,11 +60,6 @@ _PROVIDER_BUILDERS: dict[str, dict] = {
         "kwargs": {},
     },
 }
-
-
-def _http_client() -> httpx.Client:
-    """One bounded client shared by every provider. See the module docstring."""
-    return httpx.Client(timeout=httpx.Timeout(MODEL_TIMEOUT))
 
 
 def configured_providers() -> tuple[str, ...]:
@@ -107,7 +106,12 @@ def build_provider_model(provider: str):
         provider_model_id(provider),
         api_key=key,
         temperature=0,
-        http_client=_http_client(),
+        # request_timeout is the supported knob. It is passed to the model
+        # constructor rather than smuggled through an httpx.Client in
+        # model_kwargs: ChatNVIDIA serialises model_kwargs into the request
+        # body, and an httpx.Client in there raises
+        # "Object of type Client is not JSON serializable" on every call.
+        request_timeout=MODEL_TIMEOUT,
         **kwargs,
     )
 
