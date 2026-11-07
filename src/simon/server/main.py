@@ -361,6 +361,11 @@ async def aux(req: AuxRequest) -> dict[str, Any]:
         raise HTTPException(status_code=503, detail="model unavailable") from exc
 
     try:
+        # Bounded at the CALL, not the constructor: the NVIDIA endpoint rejects
+        # `request_timeout` as an unknown parameter, and ChatNVIDIA forwards
+        # constructor kwargs to the provider. The agent path already bounds its
+        # own calls this way; /api/aux does the same rather than relying on a
+        # construction-time knob that provably does not survive the trip.
         result = await asyncio.wait_for(
             model.ainvoke(req.prompt), timeout=req.timeout_seconds
         )

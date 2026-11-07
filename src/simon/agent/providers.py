@@ -6,16 +6,18 @@ ModelRetryMiddleware and ModelFallbackMiddleware do all of that now, and do it
 per call rather than per process, which is what makes a provider that degrades
 mid-session recoverable without a restart.
 
-What is deliberately KEPT from the old implementation: the per-call timeout.
-The old code smuggled an httpx.Client through model_kwargs to bound a slow
-provider, because `request_timeout` is inert on some integrations. That hack
-is gone -- ChatNVIDIA serialises model_kwargs into the request body, so a
-Client in there raised "Object of type Client is not JSON serializable" on
-every call. `request_timeout` is passed to the constructor instead, and
-ModelRetryMiddleware bounds a failure rather than a slow socket.
+What the old implementation got WRONG, and why it is not carried over: an
+explicit httpx.Client smuggled through model_kwargs to bound a slow provider.
+LangChain copies unknown constructor kwargs into model_kwargs and forwards
+them to the provider, so that hack fails two different ways -- ChatNVIDIA
+serialises model_kwargs into the request body and raises "Object of type
+Client is not JSON serializable", and passing the supported `request_timeout`
+instead makes the endpoint reject it as an unsupported parameter.
 
-The timeout is therefore enforced by retry policy, where the framework can
-see it, not by a client hack that broke serialization.
+So the per-call bound lives where the provider accepts it: at the call. The
+agent path already wraps its turns in asyncio.wait_for, and /api/aux does the
+same. ModelRetryMiddleware bounds a failure; nothing here bounds a socket at
+construction, because nothing here can.
 """
 
 from __future__ import annotations
@@ -28,12 +30,6 @@ from langchain.chat_models import init_chat_model
 from simon.settings import MODEL_PROVIDER_DEFAULTS, get_settings
 
 LOGGER = logging.getLogger("simon.agent")
-
-# Per-call model timeout. LangChain takes this at CONSTRUCTION time, not per
-# invoke(), so a slow provider has to be bounded where the model is built.
-# Kept under the service's turn budget so a dead provider costs a fraction of
-# a turn instead of all of it.
-MODEL_TIMEOUT = 15.0
 
 # (provider key, model id, extra kwargs). One LINE per provider -- adding a
 # fallback is a config change, not a code change.
@@ -106,12 +102,6 @@ def build_provider_model(provider: str):
         provider_model_id(provider),
         api_key=key,
         temperature=0,
-        # request_timeout is the supported knob. It is passed to the model
-        # constructor rather than smuggled through an httpx.Client in
-        # model_kwargs: ChatNVIDIA serialises model_kwargs into the request
-        # body, and an httpx.Client in there raises
-        # "Object of type Client is not JSON serializable" on every call.
-        request_timeout=MODEL_TIMEOUT,
         **kwargs,
     )
 
