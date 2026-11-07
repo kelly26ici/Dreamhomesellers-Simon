@@ -146,3 +146,20 @@ def test_middleware_is_registered_as_a_class_not_a_bare_function():
         f"auth middleware not registered; got {sorted(registered)}"
     )
     assert issubclass(registered["SharedSecretMiddleware"], BaseHTTPMiddleware)
+
+
+def test_secret_resolves_from_either_render_env_name():
+    """Regression: Render defines SIMON_SHARED_SECRET on both services, but the
+    settings field is `shared_secret`, so pydantic's default name is
+    SHARED_SECRET. With extra="ignore" the mismatch was silent: Simon read an
+    empty string, logged "auth disabled", and enforced nothing while looking
+    configured -- a deploy that changed nothing.
+
+    Both names now resolve, so the two services agree by construction.
+    """
+    plain = Settings(_env_file="", shared_secret="from-plain-name")
+    namespaced = Settings(_env_file="", simon_shared_secret="from-simon-name")
+
+    assert plain.shared_secret_value == "from-plain-name"
+    assert namespaced.shared_secret_value == "from-simon-name"
+    assert Settings(_env_file="").shared_secret_value == ""
